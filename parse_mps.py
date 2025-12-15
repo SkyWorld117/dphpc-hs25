@@ -71,7 +71,7 @@ def parse_self_MPS(path: str):
             line = re.split(" |\t", line)  # type: ignore[assignment]
             line = [x.strip() for x in line]  # type: ignore[assignment]
             line = list(filter(None, line))  # type: ignore[assignment]
-            print(line)
+            # print(line)
 
             if line[0] == "ENDATA":  # EOF
                 break
