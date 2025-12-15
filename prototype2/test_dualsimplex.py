@@ -13,7 +13,7 @@ from scipy.optimize import linprog
 import sys
 import time
 
-from dualsimplex_torch import (
+from dualsimplex import (
     solve_lp, DualSimplexError, 
     set_device, get_device, to_numpy, from_numpy,
     DEVICE, DTYPE
