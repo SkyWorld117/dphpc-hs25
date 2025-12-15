@@ -1,8 +1,8 @@
 """
-Dual Simplex Module
+Dual Simplex Module - PyTorch Version
 
-Python version of dualsimplex.f90 - Fortran 90 module for solving the asymmetric 
-dual of a problem:
+PyTorch port of dualsimplex.py for GPU acceleration.
+Solves the asymmetric dual of a problem:
 
     max C^T X
     s.t. A X <= B
@@ -14,12 +14,26 @@ Two functions are provided:
 - feasible_basis: for finding an initial dual feasible basis (Phase I)
 
 Author: Tyler Chang (original Fortran)
-Last Update: July, 2019
+PyTorch port: 2024
 """
 
-import numpy as np
-from scipy import linalg
+import torch
 from typing import Tuple, Optional
+
+# Device configuration - will use GPU if available
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DTYPE = torch.float64  # Use double precision for numerical stability
+
+
+def set_device(device: str):
+    """Set the computation device ('cuda', 'cpu', or 'mps')."""
+    global DEVICE
+    DEVICE = torch.device(device)
+
+
+def get_device() -> torch.device:
+    """Get the current computation device."""
+    return DEVICE
 
 
 class DualSimplexError(Exception):
@@ -57,17 +71,44 @@ class DualSimplexError(Exception):
         super().__init__(self.message)
 
 
+def _to_tensor(arr, device=None) -> torch.Tensor:
+    """Convert input to tensor on the specified device."""
+    if device is None:
+        device = DEVICE
+    if isinstance(arr, torch.Tensor):
+        return arr.to(device=device, dtype=DTYPE)
+    return torch.tensor(arr, device=device, dtype=DTYPE)
+
+
+def _lu_factor(A: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute LU factorization with partial pivoting."""
+    LU, pivots = torch.linalg.lu_factor(A)
+    return LU, pivots
+
+
+def _lu_solve(LU: torch.Tensor, pivots: torch.Tensor, b: torch.Tensor, trans: bool = False) -> torch.Tensor:
+    """Solve a linear system using LU factorization."""
+    if trans:
+        # For transposed solve, we need to solve A^T x = b
+        # PyTorch's lu_solve doesn't have a transpose option, so we handle it differently
+        # A^T x = b => x = (A^-1)^T b = (A^T)^-1 b
+        # We can use: x = torch.linalg.lu_solve(LU, pivots, b, adjoint=True)
+        return torch.linalg.lu_solve(LU, pivots, b.unsqueeze(-1), adjoint=True).squeeze(-1)
+    else:
+        return torch.linalg.lu_solve(LU, pivots, b.unsqueeze(-1)).squeeze(-1)
+
+
 def dualsimplex(
     n: int,
     m: int,
-    AT: np.ndarray,
-    B: np.ndarray,
-    C: np.ndarray,
-    ibasis: np.ndarray,
+    AT: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    ibasis: torch.Tensor,
     eps: Optional[float] = None,
     ibudget: int = 50000,
     return_basis: bool = False
-) -> Tuple[np.ndarray, np.ndarray, int, Optional[np.ndarray]]:
+) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[torch.Tensor]]:
     """
     Solve a primal problem of the form:
     
@@ -88,13 +129,13 @@ def dualsimplex(
         Number of variables in the primal problem
     m : int
         Number of constraints in the primal problem
-    AT : np.ndarray
+    AT : torch.Tensor
         Transpose of the constraint matrix A, shape (n, m)
-    B : np.ndarray
+    B : torch.Tensor
         Upper bounds vector, shape (m,)
-    C : np.ndarray
+    C : torch.Tensor
         Cost vector, shape (n,)
-    ibasis : np.ndarray
+    ibasis : torch.Tensor
         Initial dual feasible basis indices, shape (n,)
     eps : float, optional
         Working precision (default: sqrt of machine epsilon)
@@ -105,18 +146,23 @@ def dualsimplex(
     
     Returns
     -------
-    X : np.ndarray
+    X : torch.Tensor
         Primal solution, shape (n,)
-    Y : np.ndarray
+    Y : torch.Tensor
         Dual solution, shape (m,)
     ierr : int
         Error code (0 = success)
-    obasis : np.ndarray or None
+    obasis : torch.Tensor or None
         Final basis indices if return_basis=True
     """
     # Set default eps
     if eps is None:
-        eps = np.finfo(float).eps
+        eps = torch.finfo(DTYPE).eps
+    
+    # Convert inputs to tensors
+    AT = _to_tensor(AT)
+    B = _to_tensor(B)
+    C = _to_tensor(C)
     
     # Input validation
     if n < 1:
@@ -138,71 +184,76 @@ def dualsimplex(
     if ibudget < 0:
         raise DualSimplexError(21)
     
+    # Convert ibasis to tensor if needed
+    if isinstance(ibasis, torch.Tensor):
+        ibasis = ibasis.clone().to(device=DEVICE, dtype=torch.long)
+    else:
+        ibasis = torch.tensor(ibasis, device=DEVICE, dtype=torch.long)
+    
     # Check initial basis validity
-    ibasis = ibasis.copy()
-    if np.any(ibasis < 0) or np.any(ibasis >= m):
+    if torch.any(ibasis < 0) or torch.any(ibasis >= m):
         raise DualSimplexError(30)
-    if len(np.unique(ibasis)) != n:
+    if len(torch.unique(ibasis)) != n:
         raise DualSimplexError(31)
     
     # Initialize pivot tracking
-    jpiv = np.arange(m)
+    jpiv = torch.arange(m, device=DEVICE, dtype=torch.long)
     
     # Initialize APIV and BPIV
-    apiv = AT.copy()
-    bpiv = B.copy()
+    apiv = AT.clone()
+    bpiv = B.clone()
     
     # Pivot to match initial basis
     for i in range(n):
-        j = np.where(jpiv == ibasis[i])[0][0]
+        j = (jpiv == ibasis[i]).nonzero(as_tuple=True)[0][0].item()
         # Swap columns in APIV
         apiv[:, [i, j]] = apiv[:, [j, i]]
         # Swap elements in BPIV
-        bpiv[i], bpiv[j] = bpiv[j], bpiv[i]
+        bpiv[i], bpiv[j] = bpiv[j].clone(), bpiv[i].clone()
         # Track changes
-        jpiv[i], jpiv[j] = jpiv[j], jpiv[i]
+        jpiv[i], jpiv[j] = jpiv[j].clone(), jpiv[i].clone()
     
     # Initialize solution arrays
-    X = np.zeros(n)
-    Y = np.zeros(m)
+    X = torch.zeros(n, device=DEVICE, dtype=DTYPE)
+    Y = torch.zeros(m, device=DEVICE, dtype=DTYPE)
     
     # Get solution using LU factorization
     try:
-        lu, piv = linalg.lu_factor(apiv[:, :n])
-    except linalg.LinAlgError:
+        lu, piv = _lu_factor(apiv[:, :n])
+    except RuntimeError:
         raise DualSimplexError(32)
     
     # Solve for first N elements of dual solution
     try:
-        Y[:n] = linalg.lu_solve((lu, piv), C)
-    except linalg.LinAlgError:
+        Y[:n] = _lu_solve(lu, piv, C)
+    except RuntimeError:
         raise DualSimplexError(51)
     
-    if np.any(Y[:n] < -eps):
+    if torch.any(Y[:n] < -eps):
         raise DualSimplexError(33)
     
     Y[n:] = 0.0
     
     # Get primal solution
     try:
-        X = linalg.lu_solve((lu, piv), bpiv[:n], trans=1)
-    except linalg.LinAlgError:
+        X = _lu_solve(lu, piv, bpiv[:n], trans=True)
+    except RuntimeError:
         raise DualSimplexError(51)
     
     # Compute slack variables
     S = bpiv[n:] - apiv[:, n:].T @ X
     
     # Check KKT conditions
-    if np.all(S >= -eps):
+    if torch.all(S >= -eps):
         # Undo pivots in Y
-        Y_out = np.zeros(m)
+        Y_out = torch.zeros(m, device=DEVICE, dtype=DTYPE)
         for i in range(m):
             Y_out[jpiv[i]] = Y[i]
-        obasis = jpiv[:n].copy() if return_basis else None
+        obasis = jpiv[:n].clone() if return_basis else None
         return X, Y_out, 0, obasis
     
     # Begin iteration
-    newsol = np.dot(bpiv[:n], Y[:n])
+    newsol = torch.dot(bpiv[:n], Y[:n])
     oldsol = newsol + 1.0
     
     for iteration in range(ibudget):
@@ -220,68 +271,68 @@ def dualsimplex(
         
         # Perform pivot
         apiv[:, [iexit, ienter]] = apiv[:, [ienter, iexit]]
-        bpiv[iexit], bpiv[ienter] = bpiv[ienter], bpiv[iexit]
-        jpiv[iexit], jpiv[ienter] = jpiv[ienter], jpiv[iexit]
+        bpiv[iexit], bpiv[ienter] = bpiv[ienter].clone(), bpiv[iexit].clone()
+        jpiv[iexit], jpiv[ienter] = jpiv[ienter].clone(), jpiv[iexit].clone()
         
         # Update LU factorization
         try:
-            lu, piv = linalg.lu_factor(apiv[:, :n])
-        except linalg.LinAlgError:
+            lu, piv = _lu_factor(apiv[:, :n])
+        except RuntimeError:
             raise DualSimplexError(41)
         
         # Update dual solution
         try:
-            Y[:n] = linalg.lu_solve((lu, piv), C)
-        except linalg.LinAlgError:
+            Y[:n] = _lu_solve(lu, piv, C)
+        except RuntimeError:
             raise DualSimplexError(51)
         
         # Update primal solution
         try:
-            X = linalg.lu_solve((lu, piv), bpiv[:n], trans=1)
-        except linalg.LinAlgError:
+            X = _lu_solve(lu, piv, bpiv[:n], trans=True)
+        except RuntimeError:
             raise DualSimplexError(51)
         
         # Update slack variables
         S = bpiv[n:] - apiv[:, n:].T @ X
         
         # Check KKT conditions
-        if np.all(S >= -eps):
+        if torch.all(S >= -eps):
             # Undo pivots in Y
-            Y_out = np.zeros(m)
+            Y_out = torch.zeros(m, device=DEVICE, dtype=DTYPE)
             for i in range(m):
                 Y_out[jpiv[i]] = Y[i]
-            obasis = jpiv[:n].copy() if return_basis else None
+            obasis = jpiv[:n].clone() if return_basis else None
             return X, Y_out, 0, obasis
         
         # Update solutions
         oldsol = newsol
-        newsol = np.dot(bpiv[:n], Y[:n])
+        newsol = torch.dot(bpiv[:n], Y[:n])
     
     # Budget exceeded
     raise DualSimplexError(40)
 
 
 def _pivot_dantzig(
-    n: int, m: int, apiv: np.ndarray, Y: np.ndarray, S: np.ndarray,
-    lu: np.ndarray, piv: np.ndarray, eps: float
+    n: int, m: int, apiv: torch.Tensor, Y: torch.Tensor, S: torch.Tensor,
+    lu: torch.Tensor, piv: torch.Tensor, eps: float
 ) -> Tuple[int, Optional[int]]:
     """
     Pivot using Dantzig's minimum ratio method for fast convergence.
     """
     # Entering index: most negative slack
-    ienter = np.argmin(S) + n
+    ienter = torch.argmin(S).item() + n
     
     # Build weight vector
-    W = linalg.lu_solve((lu, piv), apiv[:, ienter])
+    W = _lu_solve(lu, piv, apiv[:, ienter])
     
     # Compute ratios and choose exiting index
-    currmin = np.inf
+    currmin = float('inf')
     iexit = None
     
     for j in range(n):
-        if W[j] < eps:
+        if W[j].item() < eps:
             continue
-        ratio = Y[j] / W[j]
+        ratio = Y[j].item() / W[j].item()
         if ratio < currmin:
             currmin = ratio
             iexit = j
@@ -290,8 +341,8 @@ def _pivot_dantzig(
 
 
 def _pivot_bland(
-    n: int, m: int, apiv: np.ndarray, Y: np.ndarray, S: np.ndarray,
-    lu: np.ndarray, piv: np.ndarray, eps: float
+    n: int, m: int, apiv: torch.Tensor, Y: torch.Tensor, S: torch.Tensor,
+    lu: torch.Tensor, piv: torch.Tensor, eps: float
 ) -> Tuple[int, Optional[int]]:
     """
     Pivot using Bland's anticycling rule for guaranteed convergence.
@@ -299,7 +350,7 @@ def _pivot_bland(
     # Entering index: first negative slack
     ienter = None
     for j in range(m - n):
-        if S[j] < -eps:
+        if S[j].item() < -eps:
             ienter = j + n
             break
     
@@ -307,16 +358,16 @@ def _pivot_bland(
         return n, None
     
     # Build weight vector
-    W = linalg.lu_solve((lu, piv), apiv[:, ienter])
+    W = _lu_solve(lu, piv, apiv[:, ienter])
     
     # Compute ratios and choose exiting index
-    currmin = np.inf
+    currmin = float('inf')
     iexit = None
     
     for j in range(n):
-        if W[j] < eps:
+        if W[j].item() < eps:
             continue
-        ratio = Y[j] / W[j]
+        ratio = Y[j].item() / W[j].item()
         if ratio - currmin < -eps:
             currmin = ratio
             iexit = j
@@ -327,11 +378,11 @@ def _pivot_bland(
 def feasible_basis(
     n: int,
     m: int,
-    AT: np.ndarray,
-    C: np.ndarray,
+    AT: torch.Tensor,
+    C: torch.Tensor,
     eps: Optional[float] = None,
     ibudget: int = 50000
-) -> Tuple[np.ndarray, int]:
+) -> Tuple[torch.Tensor, int]:
     """
     Find a dual feasible basis for a primal problem using the auxiliary method.
     
@@ -341,9 +392,9 @@ def feasible_basis(
         Number of variables in the primal problem
     m : int
         Number of constraints in the primal problem
-    AT : np.ndarray
+    AT : torch.Tensor
         Transpose of the constraint matrix A, shape (n, m)
-    C : np.ndarray
+    C : torch.Tensor
         Cost vector, shape (n,)
     eps : float, optional
         Working precision (default: sqrt of machine epsilon)
@@ -352,14 +403,18 @@ def feasible_basis(
     
     Returns
     -------
-    basis : np.ndarray
+    basis : torch.Tensor
         Indices of a dual feasible basis for AT
     ierr : int
         Error code (0 = success)
     """
     # Set default eps
     if eps is None:
-        eps = np.finfo(float).eps
+        eps = torch.finfo(DTYPE).eps
+    
+    # Convert inputs to tensors
+    AT = _to_tensor(AT)
+    C = _to_tensor(C)
     
     # Input validation
     if n < 1:
@@ -378,18 +433,18 @@ def feasible_basis(
         raise DualSimplexError(21)
     
     # Build auxiliary problem
-    A_aux = np.zeros((n, n + m))
+    A_aux = torch.zeros((n, n + m), device=DEVICE, dtype=DTYPE)
     A_aux[:, n:n+m] = AT
     
-    B_aux = np.zeros(n + m)
+    B_aux = torch.zeros(n + m, device=DEVICE, dtype=DTYPE)
     B_aux[:n] = 1.0
     
     # Create artificial variables
     for i in range(n):
-        A_aux[i, i] = np.sign(C[i]) if C[i] != 0 else 1.0
+        A_aux[i, i] = torch.sign(C[i]).item() if C[i].item() != 0 else 1.0
     
     # Initial basis
-    ibasis = np.arange(n)
+    ibasis = torch.arange(n, device=DEVICE, dtype=torch.long)
     
     # Solve auxiliary problem
     X, Y_aux, ierr, basis = dualsimplex(
@@ -401,7 +456,7 @@ def feasible_basis(
         raise DualSimplexError(ierr)
     
     # Check for infeasible dual solution
-    if np.dot(Y_aux, B_aux) > eps:
+    if torch.dot(Y_aux, B_aux).item() > eps:
         raise DualSimplexError(2)
     
     # Adjust basis indices
@@ -409,9 +464,9 @@ def feasible_basis(
     
     # Handle degeneracies - ensure all basis elements are legal
     for i in range(n):
-        if basis[i] < 0:
+        if basis[i].item() < 0:
             idx = 0
-            while idx in basis:
+            while idx in basis.tolist():
                 idx += 1
             basis[i] = idx
     
@@ -419,12 +474,12 @@ def feasible_basis(
 
 
 def solve_lp(
-    A: np.ndarray,
-    B: np.ndarray,
-    C: np.ndarray,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
     eps: Optional[float] = None,
     ibudget: int = 50000
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
     Convenience function to solve an LP from scratch.
     
@@ -434,11 +489,11 @@ def solve_lp(
     
     Parameters
     ----------
-    A : np.ndarray
+    A : torch.Tensor or np.ndarray
         Constraint matrix, shape (m, n)
-    B : np.ndarray
+    B : torch.Tensor or np.ndarray
         Upper bounds, shape (m,)
-    C : np.ndarray
+    C : torch.Tensor or np.ndarray
         Cost vector, shape (n,)
     eps : float, optional
         Working precision
@@ -447,17 +502,22 @@ def solve_lp(
     
     Returns
     -------
-    X : np.ndarray
+    X : torch.Tensor
         Primal solution
-    Y : np.ndarray
+    Y : torch.Tensor
         Dual solution
-    basis : np.ndarray
+    basis : torch.Tensor
         Final basis indices
     ierr : int
         Error code
     """
     if eps is None:
-        eps = np.sqrt(np.finfo(float).eps)
+        eps = float(torch.finfo(DTYPE).eps ** 0.5)
+    
+    # Convert to tensors
+    A = _to_tensor(A)
+    B = _to_tensor(B)
+    C = _to_tensor(C)
     
     m, n = A.shape
     AT = A.T  # Transpose for our implementation
@@ -474,3 +534,14 @@ def solve_lp(
     )
     
     return X, Y, obasis, ierr
+
+
+# Utility functions for numpy interoperability
+def to_numpy(tensor: torch.Tensor):
+    """Convert a tensor to numpy array."""
+    return tensor.detach().cpu().numpy()
+
+
+def from_numpy(arr, device=None):
+    """Convert a numpy array to tensor."""
+    return _to_tensor(arr, device)
