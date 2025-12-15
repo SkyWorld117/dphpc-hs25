@@ -190,6 +190,8 @@ def test_mps_file(mps_path: str, device='cpu', max_iter=10000, verbose=True) -> 
         solve_start = time.time()
 
         X, Y, basis, ierr = solve_lp(A, b, c)
+        if X is not None:
+            X = X.to(device, dtype=torch.float32)
 
         result.solve_time = time.time() - solve_start
 
