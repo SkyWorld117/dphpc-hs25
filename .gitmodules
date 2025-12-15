@@ -1,0 +1,3 @@
+[submodule "Fortran Source"]
+    path = DualSimplex
+    url = https://github.com/thchang/DualSimplex.git
