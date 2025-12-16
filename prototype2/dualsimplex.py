@@ -82,22 +82,55 @@ def _to_tensor(arr, device=None) -> torch.Tensor:
     return torch.tensor(arr, device=device, dtype=DTYPE)
 
 
-def _lu_factor(A: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute LU factorization with partial pivoting."""
-    LU, pivots = torch.linalg.lu_factor(A)
-    return LU, pivots
+def _compute_basis_inverse(A: torch.Tensor) -> torch.Tensor:
+    """Compute pseudo-inverse of basis matrix."""
+    return torch.linalg.pinv(A)
 
 
-def _lu_solve(LU: torch.Tensor, pivots: torch.Tensor, b: torch.Tensor, trans: bool = False) -> torch.Tensor:
-    """Solve a linear system using LU factorization."""
+def _apply_eta_update(B_inv: torch.Tensor, eta_col: torch.Tensor, pivot_row: int) -> torch.Tensor:
+    """
+    Apply eta transformation to update the basis inverse.
+    
+    When we pivot, the new basis matrix B_new = B * E where E is an eta matrix.
+    E is the identity matrix with column `pivot_row` replaced by `eta_col`.
+    
+    B_new^{-1} = E^{-1} * B^{-1}
+    
+    E^{-1} is also an eta matrix where:
+    - E^{-1}[pivot_row, pivot_row] = 1 / eta_col[pivot_row]
+    - E^{-1}[j, pivot_row] = -eta_col[j] / eta_col[pivot_row] for j != pivot_row
+    """
+    n = B_inv.shape[0]
+    pivot_val = eta_col[pivot_row]
+    
+    # Compute the eta inverse column
+    eta_inv = -eta_col / pivot_val
+    eta_inv[pivot_row] = 1.0 / pivot_val
+    
+    # Apply E^{-1} * B_inv
+    # This is equivalent to: new_B_inv[i, :] = B_inv[i, :] + eta_inv[i] * B_inv[pivot_row, :] - delta_{i, pivot_row} * B_inv[pivot_row, :]
+    # Simplified: for i != pivot_row: new_B_inv[i, :] = B_inv[i, :] + eta_inv[i] * B_inv[pivot_row, :]
+    #             for i == pivot_row: new_B_inv[pivot_row, :] = eta_inv[pivot_row] * B_inv[pivot_row, :]
+    
+    new_B_inv = B_inv.clone()
+    pivot_row_vec = B_inv[pivot_row, :].clone()
+    
+    # Update all rows
+    new_B_inv += eta_inv.unsqueeze(1) * pivot_row_vec.unsqueeze(0)
+    # Correct the pivot row (it was added twice)
+    new_B_inv[pivot_row, :] = eta_inv[pivot_row] * pivot_row_vec
+    
+    return new_B_inv
+
+
+def _solve_with_inverse(B_inv: torch.Tensor, b: torch.Tensor, trans: bool = False) -> torch.Tensor:
+    """Solve a linear system using the basis inverse."""
     if trans:
-        # For transposed solve, we need to solve A^T x = b
-        # PyTorch's lu_solve doesn't have a transpose option, so we handle it differently
-        # A^T x = b => x = (A^-1)^T b = (A^T)^-1 b
-        # We can use: x = torch.linalg.lu_solve(LU, pivots, b, adjoint=True)
-        return torch.linalg.lu_solve(LU, pivots, b.unsqueeze(-1), adjoint=True).squeeze(-1)
+        # Solve A^T x = b => x = (A^{-1})^T b = B_inv^T @ b
+        return B_inv.T @ b
     else:
-        return torch.linalg.lu_solve(LU, pivots, b.unsqueeze(-1)).squeeze(-1)
+        # Solve A x = b => x = A^{-1} b = B_inv @ b
+        return B_inv @ b
 
 
 def dualsimplex(
@@ -109,7 +142,8 @@ def dualsimplex(
     ibasis: torch.Tensor,
     eps: Optional[float] = None,
     ibudget: int = 50000,
-    return_basis: bool = False
+    return_basis: bool = False,
+    refactor_interval: int = 100
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[torch.Tensor]]:
     """
     Solve a primal problem of the form:
@@ -145,6 +179,9 @@ def dualsimplex(
         Maximum number of pivots allowed (default: 50000)
     return_basis : bool, optional
         Whether to return the final basis (default: False)
+    refactor_interval : int, optional
+        Number of iterations between full pseudo-inverse recomputation (default: 100).
+        Lower values improve numerical stability but reduce performance.
     
     Returns
     -------
@@ -219,15 +256,15 @@ def dualsimplex(
     X = torch.zeros(n, device=DEVICE, dtype=DTYPE)
     Y = torch.zeros(m, device=DEVICE, dtype=DTYPE)
     
-    # Get solution using LU factorization
+    # Get solution using pseudo-inverse
     try:
-        lu, piv = _lu_factor(apiv[:, :n])
+        B_inv = _compute_basis_inverse(apiv[:, :n])
     except RuntimeError:
         raise DualSimplexError(32)
     
     # Solve for first N elements of dual solution
     try:
-        Y[:n] = _lu_solve(lu, piv, C)
+        Y[:n] = _solve_with_inverse(B_inv, C)
     except RuntimeError:
         raise DualSimplexError(51)
     
@@ -238,9 +275,12 @@ def dualsimplex(
     
     # Get primal solution
     try:
-        X = _lu_solve(lu, piv, bpiv[:n], trans=True)
+        X = _solve_with_inverse(B_inv, bpiv[:n], trans=True)
     except RuntimeError:
         raise DualSimplexError(51)
+    
+    # Track iterations since last refactorization
+    iters_since_refactor = 0
     
     # Compute slack variables
     S = bpiv[n:] - apiv[:, n:].T @ X
@@ -262,35 +302,49 @@ def dualsimplex(
         # Choose pivot rule based on improvement
         if oldsol - newsol > eps:
             # Use Dantzig's rule
-            ienter, iexit = _pivot_dantzig(n, m, apiv, Y, S, lu, piv, eps)
+            ienter, iexit = _pivot_dantzig(n, m, apiv, Y, S, B_inv, eps)
         else:
             # Use Bland's rule
-            ienter, iexit = _pivot_bland(n, m, apiv, Y, S, lu, piv, eps)
+            ienter, iexit = _pivot_bland(n, m, apiv, Y, S, B_inv, eps)
+        # TODO consider using dual steepest edge
         
         if iexit is None:
             # Dual unbounded
             raise DualSimplexError(1)
+        
+        # Compute eta column before swapping (this is B_inv @ entering column)
+        eta_col = _solve_with_inverse(B_inv, apiv[:, ienter])
         
         # Perform pivot
         apiv[:, [iexit, ienter]] = apiv[:, [ienter, iexit]]
         bpiv[iexit], bpiv[ienter] = bpiv[ienter].clone(), bpiv[iexit].clone()
         jpiv[iexit], jpiv[ienter] = jpiv[ienter].clone(), jpiv[iexit].clone()
         
-        # Update LU factorization
-        try:
-            lu, piv = _lu_factor(apiv[:, :n])
-        except RuntimeError:
-            raise DualSimplexError(41)
+        # Update basis inverse using eta transformation or recompute
+        iters_since_refactor += 1
+        if iters_since_refactor >= refactor_interval:
+            # Full refactorization
+            try:
+                B_inv = _compute_basis_inverse(apiv[:, :n])
+            except RuntimeError:
+                raise DualSimplexError(41)
+            iters_since_refactor = 0
+        else:
+            # Incremental update using eta transformation
+            try:
+                B_inv = _apply_eta_update(B_inv, eta_col, iexit)
+            except RuntimeError:
+                raise DualSimplexError(41)
         
         # Update dual solution
         try:
-            Y[:n] = _lu_solve(lu, piv, C)
+            Y[:n] = _solve_with_inverse(B_inv, C)
         except RuntimeError:
             raise DualSimplexError(51)
         
         # Update primal solution
         try:
-            X = _lu_solve(lu, piv, bpiv[:n], trans=True)
+            X = _solve_with_inverse(B_inv, bpiv[:n], trans=True)
         except RuntimeError:
             raise DualSimplexError(51)
         
@@ -316,7 +370,7 @@ def dualsimplex(
 
 def _pivot_dantzig(
     n: int, m: int, apiv: torch.Tensor, Y: torch.Tensor, S: torch.Tensor,
-    lu: torch.Tensor, piv: torch.Tensor, eps: float
+    B_inv: torch.Tensor, eps: float
 ) -> Tuple[int, Optional[int]]:
     """
     Pivot using Dantzig's minimum ratio method for fast convergence.
@@ -324,21 +378,10 @@ def _pivot_dantzig(
     # Entering index: most negative slack
     ienter = torch.argmin(S).item() + n
     
-    # Build weight vector
-    W = _lu_solve(lu, piv, apiv[:, ienter])
+    # Build weight vector using basis inverse
+    W = _solve_with_inverse(B_inv, apiv[:, ienter])
     
     # Compute ratios and choose exiting index
-    # currmin = float('inf')
-    # iexit = None
-    
-    # for j in range(n):
-    #     if W[j].item() < eps:
-    #         continue
-    #     ratio = Y[j].item() / W[j].item()
-    #     if ratio < currmin:
-    #         currmin = ratio
-    #         iexit = j
-
     if (torch.any(W > eps) == False):
         return ienter, None
 
@@ -350,19 +393,12 @@ def _pivot_dantzig(
 
 def _pivot_bland(
     n: int, m: int, apiv: torch.Tensor, Y: torch.Tensor, S: torch.Tensor,
-    lu: torch.Tensor, piv: torch.Tensor, eps: float
+    B_inv: torch.Tensor, eps: float
 ) -> Tuple[int, Optional[int]]:
     """
     Pivot using Bland's anticycling rule for guaranteed convergence.
     """
     # Entering index: first negative slack
-
-    # ienter = None
-    # for j in range(m - n):
-    #     if S[j].item() < -eps:
-    #         ienter = j + n
-    #         break
-
     if torch.any(S < -eps) == False:
         ienter = None
     else:
@@ -371,21 +407,10 @@ def _pivot_bland(
     if ienter is None:
         return n, None
     
-    # Build weight vector
-    W = _lu_solve(lu, piv, apiv[:, ienter])
+    # Build weight vector using basis inverse
+    W = _solve_with_inverse(B_inv, apiv[:, ienter])
     
     # Compute ratios and choose exiting index
-    # currmin = float('inf')
-    # iexit = None
-    
-    # for j in range(n):
-    #     if W[j].item() < eps:
-    #         continue
-    #     ratio = Y[j].item() / W[j].item()
-    #     if ratio - currmin < -eps:
-    #         currmin = ratio
-    #         iexit = j
-
     if (torch.any(W > eps) == False):
         return ienter, None
 
@@ -401,7 +426,8 @@ def feasible_basis(
     AT: torch.Tensor,
     C: torch.Tensor,
     eps: Optional[float] = None,
-    ibudget: int = 50000
+    ibudget: int = 50000,
+    refactor_interval: int = 100
 ) -> Tuple[torch.Tensor, int]:
     """
     Find a dual feasible basis for a primal problem using the auxiliary method.
@@ -420,6 +446,8 @@ def feasible_basis(
         Working precision (default: sqrt of machine epsilon)
     ibudget : int, optional
         Maximum number of pivots (default: 50000)
+    refactor_interval : int, optional
+        Number of iterations between full pseudo-inverse recomputation (default: 100)
     
     Returns
     -------
@@ -471,7 +499,7 @@ def feasible_basis(
     # Solve auxiliary problem
     X, Y_aux, ierr, basis = dualsimplex(
         n, n + m, A_aux, B_aux, C, ibasis,
-        eps=eps, ibudget=ibudget, return_basis=True
+        eps=eps, ibudget=ibudget, return_basis=True, refactor_interval=refactor_interval
     )
     
     if ierr != 0:
@@ -500,7 +528,8 @@ def solve_lp(
     B: torch.Tensor,
     C: torch.Tensor,
     eps: Optional[float] = None,
-    ibudget: int = 50000
+    ibudget: int = 50000,
+    refactor_interval: int = 100
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
     Convenience function to solve an LP from scratch.
@@ -521,6 +550,8 @@ def solve_lp(
         Working precision
     ibudget : int, optional
         Maximum pivots
+    refactor_interval : int, optional
+        Number of iterations between full pseudo-inverse recomputation (default: 100)
     
     Returns
     -------
@@ -545,14 +576,14 @@ def solve_lp(
     AT = A.T  # Transpose for our implementation
     
     # Find initial feasible basis
-    basis, ierr = feasible_basis(n, m, AT, C, eps=eps, ibudget=ibudget)
+    basis, ierr = feasible_basis(n, m, AT, C, eps=eps, ibudget=ibudget, refactor_interval=refactor_interval)
     if ierr != 0:
         return None, None, None, ierr
 
     # Solve the LP
     X, Y, ierr, obasis = dualsimplex(
         n, m, AT, B, C, basis,
-        eps=eps, ibudget=ibudget, return_basis=True
+        eps=eps, ibudget=ibudget, return_basis=True, refactor_interval=refactor_interval
     )
 
     return X, Y, obasis, ierr
