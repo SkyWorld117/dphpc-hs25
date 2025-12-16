@@ -18,12 +18,14 @@ PyTorch port: 2024
 """
 
 import torch
+from torch.profiler import record_function
 from typing import Tuple, Optional
 
 # Device configuration - will use GPU if available
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64  # Use double precision for numerical stability
 
+torch.set_grad_enabled(False)  # Disable autograd for optimization routines
 
 def set_device(device: str):
     """Set the computation device ('cuda', 'cpu', or 'mps')."""
@@ -212,7 +214,7 @@ def dualsimplex(
         bpiv[i], bpiv[j] = bpiv[j].clone(), bpiv[i].clone()
         # Track changes
         jpiv[i], jpiv[j] = jpiv[j].clone(), jpiv[i].clone()
-    
+
     # Initialize solution arrays
     X = torch.zeros(n, device=DEVICE, dtype=DTYPE)
     Y = torch.zeros(m, device=DEVICE, dtype=DTYPE)
@@ -326,16 +328,22 @@ def _pivot_dantzig(
     W = _lu_solve(lu, piv, apiv[:, ienter])
     
     # Compute ratios and choose exiting index
-    currmin = float('inf')
-    iexit = None
+    # currmin = float('inf')
+    # iexit = None
     
-    for j in range(n):
-        if W[j].item() < eps:
-            continue
-        ratio = Y[j].item() / W[j].item()
-        if ratio < currmin:
-            currmin = ratio
-            iexit = j
+    # for j in range(n):
+    #     if W[j].item() < eps:
+    #         continue
+    #     ratio = Y[j].item() / W[j].item()
+    #     if ratio < currmin:
+    #         currmin = ratio
+    #         iexit = j
+
+    if (torch.any(W > eps) == False):
+        return ienter, None
+
+    ratio = Y[:n] / W
+    iexit = torch.argmin(torch.where(W > eps, ratio, torch.inf)).item()
     
     return ienter, iexit
 
@@ -348,11 +356,17 @@ def _pivot_bland(
     Pivot using Bland's anticycling rule for guaranteed convergence.
     """
     # Entering index: first negative slack
-    ienter = None
-    for j in range(m - n):
-        if S[j].item() < -eps:
-            ienter = j + n
-            break
+
+    # ienter = None
+    # for j in range(m - n):
+    #     if S[j].item() < -eps:
+    #         ienter = j + n
+    #         break
+
+    if torch.any(S < -eps) == False:
+        ienter = None
+    else:
+        ienter = torch.where(S < -eps, S, torch.inf)[0].item() + n
     
     if ienter is None:
         return n, None
@@ -361,16 +375,22 @@ def _pivot_bland(
     W = _lu_solve(lu, piv, apiv[:, ienter])
     
     # Compute ratios and choose exiting index
-    currmin = float('inf')
-    iexit = None
+    # currmin = float('inf')
+    # iexit = None
     
-    for j in range(n):
-        if W[j].item() < eps:
-            continue
-        ratio = Y[j].item() / W[j].item()
-        if ratio - currmin < -eps:
-            currmin = ratio
-            iexit = j
+    # for j in range(n):
+    #     if W[j].item() < eps:
+    #         continue
+    #     ratio = Y[j].item() / W[j].item()
+    #     if ratio - currmin < -eps:
+    #         currmin = ratio
+    #         iexit = j
+
+    if (torch.any(W > eps) == False):
+        return ienter, None
+
+    ratio = Y[:n] / W
+    iexit = torch.argmin(torch.where(W > eps, ratio, torch.inf)).item()
     
     return ienter, iexit
 
@@ -440,8 +460,10 @@ def feasible_basis(
     B_aux[:n] = 1.0
     
     # Create artificial variables
-    for i in range(n):
-        A_aux[i, i] = torch.sign(C[i]).item() if C[i].item() != 0 else 1.0
+    # TODO: This gets slower huh?
+    # for i in range(n):
+    #     A_aux[i, i] = torch.sign(C[i]).item() if C[i].item() != 0 else 1.0
+    A_aux[torch.arange(n), torch.arange(n)] = torch.where(C != 0, torch.sign(C), torch.tensor(1.0, device=DEVICE, dtype=DTYPE))
     
     # Initial basis
     ibasis = torch.arange(n, device=DEVICE, dtype=torch.long)
@@ -526,13 +548,13 @@ def solve_lp(
     basis, ierr = feasible_basis(n, m, AT, C, eps=eps, ibudget=ibudget)
     if ierr != 0:
         return None, None, None, ierr
-    
+
     # Solve the LP
     X, Y, ierr, obasis = dualsimplex(
         n, m, AT, B, C, basis,
         eps=eps, ibudget=ibudget, return_basis=True
     )
-    
+
     return X, Y, obasis, ierr
 
 
