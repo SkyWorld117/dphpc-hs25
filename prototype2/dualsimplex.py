@@ -87,9 +87,10 @@ def _compute_basis_inverse(A: torch.Tensor) -> torch.Tensor:
     return torch.linalg.pinv(A)
 
 
-def _apply_eta_update(B_inv: torch.Tensor, eta_col: torch.Tensor, pivot_row: int) -> None:
+def _apply_eta_update(B_inv: torch.Tensor, eta_col: torch.Tensor, pivot_row: int, 
+                      pivot_row_buf: torch.Tensor = None) -> None:
     """
-    Apply eta transformation to update the basis inverse.
+    Apply eta transformation to update the basis inverse (in-place).
     
     When we pivot, the new basis matrix B_new = B * E where E is an eta matrix.
     E is the identity matrix with column `pivot_row` replaced by `eta_col`.
@@ -99,34 +100,50 @@ def _apply_eta_update(B_inv: torch.Tensor, eta_col: torch.Tensor, pivot_row: int
     E^{-1} is also an eta matrix where:
     - E^{-1}[pivot_row, pivot_row] = 1 / eta_col[pivot_row]
     - E^{-1}[j, pivot_row] = -eta_col[j] / eta_col[pivot_row] for j != pivot_row
+    
+    Parameters
+    ----------
+    pivot_row_buf : torch.Tensor, optional
+        Preallocated buffer for pivot row to avoid allocation
     """
-    n = B_inv.shape[0]
     pivot_val = eta_col[pivot_row]
+    inv_pivot = 1.0 / pivot_val
     
-    # Compute the eta inverse column
-    eta_inv = -eta_col / pivot_val
-    eta_inv[pivot_row] = 1.0 / pivot_val
+    # Compute eta inverse in-place
+    eta_col.mul_(-inv_pivot)
+    eta_col[pivot_row] = inv_pivot
     
-    # Apply E^{-1} * B_inv
-    # This is equivalent to: new_B_inv[i, :] = B_inv[i, :] + eta_inv[i] * B_inv[pivot_row, :] - delta_{i, pivot_row} * B_inv[pivot_row, :]
-    # Simplified: for i != pivot_row: new_B_inv[i, :] = B_inv[i, :] + eta_inv[i] * B_inv[pivot_row, :]
-    #             for i == pivot_row: new_B_inv[pivot_row, :] = eta_inv[pivot_row] * B_inv[pivot_row, :]
+    # Copy pivot row to buffer (reuse provided buffer to avoid allocation)
+    if pivot_row_buf is None:
+        pivot_row_buf = B_inv[pivot_row, :].clone()
+    else:
+        pivot_row_buf.copy_(B_inv[pivot_row, :])
     
-    pivot_row_vec = B_inv[pivot_row, :].clone()
-    
-    # Update all rows
-    B_inv += eta_inv.unsqueeze(1) * pivot_row_vec.unsqueeze(0)
+    # Apply E^{-1} * B_inv using addmm-style update
+    # B_inv += eta_col.unsqueeze(1) * pivot_row_buf.unsqueeze(0)
+    torch.addr(B_inv, eta_col, pivot_row_buf, out=B_inv)
     # Correct the pivot row (it was added twice)
-    B_inv[pivot_row, :] = eta_inv[pivot_row] * pivot_row_vec
+    B_inv[pivot_row, :].copy_(pivot_row_buf).mul_(inv_pivot)
 
 
-def _solve_with_inverse(B_inv: torch.Tensor, b: torch.Tensor, trans: bool = False) -> torch.Tensor:
-    """Solve a linear system using the basis inverse."""
+def _solve_with_inverse(B_inv: torch.Tensor, b: torch.Tensor, trans: bool = False, 
+                        out: torch.Tensor = None) -> torch.Tensor:
+    """Solve a linear system using the basis inverse.
+    
+    Parameters
+    ----------
+    out : torch.Tensor, optional
+        Preallocated output tensor to avoid allocation
+    """
     if trans:
         # Solve A^T x = b => x = (A^{-1})^T b = B_inv^T @ b
+        if out is not None:
+            return torch.mv(B_inv.T, b, out=out)
         return B_inv.T @ b
     else:
         # Solve A x = b => x = A^{-1} b = B_inv @ b
+        if out is not None:
+            return torch.mv(B_inv, b, out=out)
         return B_inv @ b
 
 
@@ -239,17 +256,25 @@ def dualsimplex(
     apiv = AT.clone()
     bpiv = B.clone()
     
-    # Pivot to match initial basis
+    # Preallocate swap buffers to avoid repeated allocations
+    _col_buf = torch.empty(n, device=DEVICE, dtype=DTYPE)
+    
+    # Pivot to match initial basis using index swaps (avoids fancy indexing overhead)
     for i in range(n):
         j = (jpiv == ibasis[i]).nonzero(as_tuple=True)[0][0].item()
-        # Swap columns in APIV
-        apiv[:, [i, j]] = apiv[:, [j, i]]
-        # Swap elements in BPIV
-        # bpiv[i], bpiv[j] = bpiv[j].clone(), bpiv[i].clone()
-        bpiv[[i, j]] = bpiv[[j, i]]
-        # Track changes
-        # jpiv[i], jpiv[j] = jpiv[j].clone(), jpiv[i].clone()
-        jpiv[[i, j]] = jpiv[[j, i]]
+        if i != j:
+            # Swap columns in APIV using buffer
+            _col_buf.copy_(apiv[:, i])
+            apiv[:, i].copy_(apiv[:, j])
+            apiv[:, j].copy_(_col_buf)
+            # Swap elements in BPIV (scalars)
+            tmp_b = bpiv[i].item()
+            bpiv[i] = bpiv[j]
+            bpiv[j] = tmp_b
+            # Swap tracking indices
+            tmp_j = jpiv[i].item()
+            jpiv[i] = jpiv[j]
+            jpiv[j] = tmp_j
 
     # Initialize solution arrays
     X = torch.zeros(n, device=DEVICE, dtype=DTYPE)
@@ -281,15 +306,21 @@ def dualsimplex(
     # Track iterations since last refactorization
     iters_since_refactor = 0
     
-    # Compute slack variables
-    S = bpiv[n:] - apiv[:, n:].T @ X
+    # Preallocate working buffers to avoid allocations in the main loop
+    S = torch.empty(m - n, device=DEVICE, dtype=DTYPE)  # Slack variables
+    eta_col = torch.empty(n, device=DEVICE, dtype=DTYPE)  # Eta column buffer
+    pivot_row_buf = torch.empty(n, device=DEVICE, dtype=DTYPE)  # For eta update
+    Y_n_buf = torch.empty(n, device=DEVICE, dtype=DTYPE)  # Buffer for Y[:n] solve
+    
+    # Compute slack variables: S = bpiv[n:] - apiv[:, n:].T @ X
+    torch.mv(apiv[:, n:].T, X, out=S)
+    S.neg_().add_(bpiv[n:])
     
     # Check KKT conditions
     if torch.all(S >= -eps):
-        # Undo pivots in Y
+        # Undo pivots in Y using scatter
         Y_out = torch.zeros(m, device=DEVICE, dtype=DTYPE)
-        for i in range(m):
-            Y_out[jpiv[i]] = Y[i]
+        Y_out.scatter_(0, jpiv, Y)
         obasis = jpiv[:n].clone() if return_basis else None
         return X, Y_out, 0, obasis
     
@@ -311,15 +342,19 @@ def dualsimplex(
             # Dual unbounded
             raise DualSimplexError(1)
         
-        # Compute eta column before swapping (this is B_inv @ entering column)
-        eta_col = _solve_with_inverse(B_inv, apiv[:, ienter])
+        # Compute eta column before swapping (reuse buffer)
+        _solve_with_inverse(B_inv, apiv[:, ienter], out=eta_col)
         
-        # Perform pivot
-        apiv[:, [iexit, ienter]] = apiv[:, [ienter, iexit]]
-        # bpiv[iexit], bpiv[ienter] = bpiv[ienter].clone(), bpiv[iexit].clone()
-        # jpiv[iexit], jpiv[ienter] = jpiv[ienter].clone(), jpiv[iexit].clone()
-        bpiv[[iexit, ienter]] = bpiv[[ienter, iexit]]
-        jpiv[[iexit, ienter]] = jpiv[[ienter, iexit]]
+        # Perform pivot using explicit swaps (avoids fancy indexing temporaries)
+        _col_buf.copy_(apiv[:, iexit])
+        apiv[:, iexit].copy_(apiv[:, ienter])
+        apiv[:, ienter].copy_(_col_buf)
+        tmp_b = bpiv[iexit].item()
+        bpiv[iexit] = bpiv[ienter]
+        bpiv[ienter] = tmp_b
+        tmp_j = jpiv[iexit].item()
+        jpiv[iexit] = jpiv[ienter]
+        jpiv[ienter] = tmp_j
         
         # Update basis inverse using eta transformation or recompute
         iters_since_refactor += 1
@@ -333,31 +368,32 @@ def dualsimplex(
         else:
             # Incremental update using eta transformation
             try:
-                _apply_eta_update(B_inv, eta_col, iexit)
+                _apply_eta_update(B_inv, eta_col, iexit, pivot_row_buf)
             except RuntimeError:
                 raise DualSimplexError(41)
         
-        # Update dual solution
+        # Update dual solution (reuse buffer then copy)
         try:
-            Y[:n] = _solve_with_inverse(B_inv, C)
+            _solve_with_inverse(B_inv, C, out=Y_n_buf)
+            Y[:n].copy_(Y_n_buf)
         except RuntimeError:
             raise DualSimplexError(51)
         
-        # Update primal solution
+        # Update primal solution in-place
         try:
-            X = _solve_with_inverse(B_inv, bpiv[:n], trans=True)
+            _solve_with_inverse(B_inv, bpiv[:n], trans=True, out=X)
         except RuntimeError:
             raise DualSimplexError(51)
         
-        # Update slack variables
-        S = bpiv[n:] - apiv[:, n:].T @ X
+        # Update slack variables in-place: S = bpiv[n:] - apiv[:, n:].T @ X
+        torch.mv(apiv[:, n:].T, X, out=S)
+        S.neg_().add_(bpiv[n:])
         
         # Check KKT conditions
         if torch.all(S >= -eps):
-            # Undo pivots in Y
+            # Undo pivots in Y using scatter (vectorized)
             Y_out = torch.zeros(m, device=DEVICE, dtype=DTYPE)
-            for i in range(m):
-                Y_out[jpiv[i]] = Y[i]
+            Y_out.scatter_(0, jpiv, Y)
             obasis = jpiv[:n].clone() if return_basis else None
             return X, Y_out, 0, obasis
         
@@ -369,6 +405,19 @@ def dualsimplex(
     raise DualSimplexError(40)
 
 
+# Preallocated buffers for pivot functions (module-level to avoid repeated allocation)
+_pivot_W: torch.Tensor = None
+_pivot_ratio: torch.Tensor = None
+
+
+def _ensure_pivot_buffers(n: int, device: torch.device):
+    """Ensure pivot buffers are allocated with correct size."""
+    global _pivot_W, _pivot_ratio
+    if _pivot_W is None or _pivot_W.shape[0] != n or _pivot_W.device != device:
+        _pivot_W = torch.empty(n, device=device, dtype=DTYPE)
+        _pivot_ratio = torch.empty(n, device=device, dtype=DTYPE)
+
+
 def _pivot_dantzig(
     n: int, m: int, apiv: torch.Tensor, Y: torch.Tensor, S: torch.Tensor,
     B_inv: torch.Tensor, eps: float
@@ -376,18 +425,21 @@ def _pivot_dantzig(
     """
     Pivot using Dantzig's minimum ratio method for fast convergence.
     """
+    _ensure_pivot_buffers(n, apiv.device)
+    
     # Entering index: most negative slack
     ienter = torch.argmin(S).item() + n
     
-    # Build weight vector using basis inverse
-    W = _solve_with_inverse(B_inv, apiv[:, ienter])
+    # Build weight vector using basis inverse (reuse buffer)
+    _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
     
     # Compute ratios and choose exiting index
-    if (torch.any(W > eps) == False):
+    if not torch.any(_pivot_W > eps):
         return ienter, None
 
-    ratio = Y[:n] / W
-    iexit = torch.argmin(torch.where(W > eps, ratio, torch.inf)).item()
+    # Compute ratio in-place
+    torch.div(Y[:n], _pivot_W, out=_pivot_ratio)
+    iexit = torch.argmin(torch.where(_pivot_W > eps, _pivot_ratio, torch.inf)).item()
     
     return ienter, iexit
 
@@ -399,24 +451,25 @@ def _pivot_bland(
     """
     Pivot using Bland's anticycling rule for guaranteed convergence.
     """
-    # Entering index: first negative slack
-    if torch.any(S < -eps) == False:
-        ienter = None
-    else:
-        ienter = torch.where(S < -eps, S, torch.inf)[0].item() + n
+    _ensure_pivot_buffers(n, apiv.device)
     
-    if ienter is None:
+    # Entering index: first negative slack
+    neg_mask = S < -eps
+    if not torch.any(neg_mask):
         return n, None
     
-    # Build weight vector using basis inverse
-    W = _solve_with_inverse(B_inv, apiv[:, ienter])
+    ienter = neg_mask.nonzero(as_tuple=True)[0][0].item() + n
+    
+    # Build weight vector using basis inverse (reuse buffer)
+    _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
     
     # Compute ratios and choose exiting index
-    if (torch.any(W > eps) == False):
+    if not torch.any(_pivot_W > eps):
         return ienter, None
 
-    ratio = Y[:n] / W
-    iexit = torch.argmin(torch.where(W > eps, ratio, torch.inf)).item()
+    # Compute ratio in-place
+    torch.div(Y[:n], _pivot_W, out=_pivot_ratio)
+    iexit = torch.argmin(torch.where(_pivot_W > eps, _pivot_ratio, torch.inf)).item()
     
     return ienter, iexit
 
