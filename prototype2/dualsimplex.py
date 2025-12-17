@@ -87,7 +87,7 @@ def _compute_basis_inverse(A: torch.Tensor) -> torch.Tensor:
     return torch.linalg.pinv(A)
 
 
-def _apply_eta_update(B_inv: torch.Tensor, eta_col: torch.Tensor, pivot_row: int) -> torch.Tensor:
+def _apply_eta_update(B_inv: torch.Tensor, eta_col: torch.Tensor, pivot_row: int) -> None:
     """
     Apply eta transformation to update the basis inverse.
     
@@ -112,15 +112,12 @@ def _apply_eta_update(B_inv: torch.Tensor, eta_col: torch.Tensor, pivot_row: int
     # Simplified: for i != pivot_row: new_B_inv[i, :] = B_inv[i, :] + eta_inv[i] * B_inv[pivot_row, :]
     #             for i == pivot_row: new_B_inv[pivot_row, :] = eta_inv[pivot_row] * B_inv[pivot_row, :]
     
-    new_B_inv = B_inv.clone()
     pivot_row_vec = B_inv[pivot_row, :].clone()
     
     # Update all rows
-    new_B_inv += eta_inv.unsqueeze(1) * pivot_row_vec.unsqueeze(0)
+    B_inv += eta_inv.unsqueeze(1) * pivot_row_vec.unsqueeze(0)
     # Correct the pivot row (it was added twice)
-    new_B_inv[pivot_row, :] = eta_inv[pivot_row] * pivot_row_vec
-    
-    return new_B_inv
+    B_inv[pivot_row, :] = eta_inv[pivot_row] * pivot_row_vec
 
 
 def _solve_with_inverse(B_inv: torch.Tensor, b: torch.Tensor, trans: bool = False) -> torch.Tensor:
@@ -248,9 +245,11 @@ def dualsimplex(
         # Swap columns in APIV
         apiv[:, [i, j]] = apiv[:, [j, i]]
         # Swap elements in BPIV
-        bpiv[i], bpiv[j] = bpiv[j].clone(), bpiv[i].clone()
+        # bpiv[i], bpiv[j] = bpiv[j].clone(), bpiv[i].clone()
+        bpiv[[i, j]] = bpiv[[j, i]]
         # Track changes
-        jpiv[i], jpiv[j] = jpiv[j].clone(), jpiv[i].clone()
+        # jpiv[i], jpiv[j] = jpiv[j].clone(), jpiv[i].clone()
+        jpiv[[i, j]] = jpiv[[j, i]]
 
     # Initialize solution arrays
     X = torch.zeros(n, device=DEVICE, dtype=DTYPE)
@@ -317,8 +316,10 @@ def dualsimplex(
         
         # Perform pivot
         apiv[:, [iexit, ienter]] = apiv[:, [ienter, iexit]]
-        bpiv[iexit], bpiv[ienter] = bpiv[ienter].clone(), bpiv[iexit].clone()
-        jpiv[iexit], jpiv[ienter] = jpiv[ienter].clone(), jpiv[iexit].clone()
+        # bpiv[iexit], bpiv[ienter] = bpiv[ienter].clone(), bpiv[iexit].clone()
+        # jpiv[iexit], jpiv[ienter] = jpiv[ienter].clone(), jpiv[iexit].clone()
+        bpiv[[iexit, ienter]] = bpiv[[ienter, iexit]]
+        jpiv[[iexit, ienter]] = jpiv[[ienter, iexit]]
         
         # Update basis inverse using eta transformation or recompute
         iters_since_refactor += 1
@@ -332,7 +333,7 @@ def dualsimplex(
         else:
             # Incremental update using eta transformation
             try:
-                B_inv = _apply_eta_update(B_inv, eta_col, iexit)
+                _apply_eta_update(B_inv, eta_col, iexit)
             except RuntimeError:
                 raise DualSimplexError(41)
         
