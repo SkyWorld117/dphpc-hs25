@@ -260,21 +260,30 @@ def dualsimplex(
     _col_buf = torch.empty(n, device=DEVICE, dtype=DTYPE)
     
     # Pivot to match initial basis using index swaps (avoids fancy indexing overhead)
-    for i in range(n):
-        j = (jpiv == ibasis[i]).nonzero(as_tuple=True)[0][0].item()
-        if i != j:
-            # Swap columns in APIV using buffer
-            _col_buf.copy_(apiv[:, i])
-            apiv[:, i].copy_(apiv[:, j])
-            apiv[:, j].copy_(_col_buf)
-            # Swap elements in BPIV (scalars)
-            tmp_b = bpiv[i].item()
-            bpiv[i] = bpiv[j]
-            bpiv[j] = tmp_b
-            # Swap tracking indices
-            tmp_j = jpiv[i].item()
-            jpiv[i] = jpiv[j]
-            jpiv[j] = tmp_j
+    # for i in range(n):
+    #     j = (jpiv == ibasis[i]).nonzero(as_tuple=True)[0][0].item()
+    #     if i != j:
+    #         # Swap columns in APIV using buffer
+    #         _col_buf.copy_(apiv[:, i])
+    #         apiv[:, i].copy_(apiv[:, j])
+    #         apiv[:, j].copy_(_col_buf)
+    #         # Swap elements in BPIV (scalars)
+    #         tmp_b = bpiv[i].item()
+    #         bpiv[i] = bpiv[j]
+    #         bpiv[j] = tmp_b
+    #         # Swap tracking indices
+    #         tmp_j = jpiv[i].item()
+    #         jpiv[i] = jpiv[j]
+    #         jpiv[j] = tmp_j
+
+    # Vectorized permutation: place ibasis entries in the first n positions in one shot
+    mask = torch.ones(m, dtype=torch.bool, device=DEVICE)
+    mask[ibasis] = False
+    remaining = torch.nonzero(mask, as_tuple=True)[0]
+    order = torch.cat([ibasis, remaining])
+    apiv = apiv[:, order]
+    bpiv = bpiv[order]
+    jpiv = jpiv[order]
 
     # Initialize solution arrays
     X = torch.zeros(n, device=DEVICE, dtype=DTYPE)
