@@ -1,9 +1,19 @@
-/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2025 NVIDIA CORPORATION & AFFILIATES. All rights
+ * reserved. SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-/* clang-format on */
 
 #include <cuopt/error.hpp>
 #include <routing/utilities/check_input.hpp>
@@ -16,7 +26,6 @@
 #include <thrust/extrema.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/logical.h>
-#include <thrust/pair.h>
 #include <cuda/std/functional>
 
 #include <unordered_set>
@@ -34,7 +43,7 @@ template <typename T>
 void transform_absolute(rmm::device_uvector<T>& v, rmm::cuda_stream_view stream_view)
 {
   thrust::transform(
-    rmm::exec_policy(stream_view), v.begin(), v.end(), v.begin(), [] __device__(T x) -> T {
+    rmm::exec_policy(stream_view), v.begin(), v.end(), v.begin(), [] __device__(const auto& x) {
       return x < 0 ? -x : x;
     });
   RAFT_CUDA_TRY(cudaStreamSynchronize(stream_view.value()));
@@ -62,12 +71,12 @@ bool check_pickup_tw(const i_t* pickup_indices,
                                                                        pickup_indices);
   thrust::permutation_iterator<IterConstInt, IterConstInt> delivery_iter(latest_time,
                                                                          delivery_indices);
-  auto zip_iterator    = thrust::make_zip_iterator(thrust::make_tuple(pickup_iter, delivery_iter));
-  bool violates_sanity = thrust::any_of(
-    rmm::exec_policy(stream_view),
-    zip_iterator,
-    zip_iterator + n_requests,
-    [] __device__(const auto& x) -> bool { return thrust::get<0>(x) > thrust::get<1>(x); });
+  auto zip_iterator = thrust::make_zip_iterator(thrust::make_tuple(pickup_iter, delivery_iter));
+  bool violates_sanity =
+    thrust::any_of(rmm::exec_policy(stream_view),
+                   zip_iterator,
+                   zip_iterator + n_requests,
+                   [] __device__(const auto& x) { return thrust::get<0>(x) > thrust::get<1>(x); });
   RAFT_CUDA_TRY(cudaStreamSynchronize(stream_view.value()));
   return !violates_sanity;
 }
@@ -95,7 +104,7 @@ bool check_pickup_demands(const i_t* pickup_indices,
     rmm::exec_policy(stream_view),
     zip_iterator,
     zip_iterator + n_requests,
-    [] __device__(const auto& x) -> bool { return thrust::get<0>(x) != -thrust::get<1>(x); });
+    [] __device__(const auto& x) { return thrust::get<0>(x) != -thrust::get<1>(x); });
   RAFT_CUDA_TRY(cudaStreamSynchronize(stream_view.value()));
   return !violates_sanity;
 }
@@ -107,14 +116,14 @@ bool check_pdp_values(const i_t* pickup_indices,
                       size_t n_requests,
                       rmm::cuda_stream_view stream_view)
 {
-  auto pickup_iter     = thrust::make_permutation_iterator(values, pickup_indices);
-  auto delivery_iter   = thrust::make_permutation_iterator(values, delivery_indices);
-  auto zip_iterator    = thrust::make_zip_iterator(thrust::make_tuple(pickup_iter, delivery_iter));
-  bool violates_sanity = thrust::any_of(
-    rmm::exec_policy(stream_view),
-    zip_iterator,
-    zip_iterator + n_requests,
-    [] __device__(const auto& x) -> bool { return thrust::get<0>(x) != thrust::get<1>(x); });
+  auto pickup_iter   = thrust::make_permutation_iterator(values, pickup_indices);
+  auto delivery_iter = thrust::make_permutation_iterator(values, delivery_indices);
+  auto zip_iterator  = thrust::make_zip_iterator(thrust::make_tuple(pickup_iter, delivery_iter));
+  bool violates_sanity =
+    thrust::any_of(rmm::exec_policy(stream_view),
+                   zip_iterator,
+                   zip_iterator + n_requests,
+                   [] __device__(const auto& x) { return thrust::get<0>(x) != thrust::get<1>(x); });
   RAFT_CUDA_TRY(cudaStreamSynchronize(stream_view.value()));
   return !violates_sanity;
 }
@@ -202,7 +211,7 @@ bool check_earliest_with_latest(rmm::device_uvector<i_t>& v_earliest_time,
                        v_earliest_time.begin(),
                        v_earliest_time.end(),
                        v_latest_time.begin(),
-                       [] __device__(i_t x, i_t y) -> bool { return x <= y; });
+                       [] __device__(auto x, auto y) { return x <= y; });
 }
 
 /**

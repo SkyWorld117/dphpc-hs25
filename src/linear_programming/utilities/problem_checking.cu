@@ -1,9 +1,19 @@
-/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights
+ * reserved. SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-/* clang-format on */
 
 #include "problem_checking.cuh"
 
@@ -11,8 +21,6 @@
 #include <cuopt/linear_programming/optimization_problem.hpp>
 #include <mip/mip_constants.hpp>
 #include <utilities/copy_helpers.hpp>
-
-#include <mip/problem/problem.cuh>
 
 #include <thrust/functional.h>
 #include <thrust/logical.h>
@@ -45,8 +53,9 @@ void problem_checking_t<i_t, f_t>::check_csr_representation(
   cuopt_expects(thrust::all_of(op_problem.get_handle_ptr()->get_thrust_policy(),
                                op_problem.get_constraint_matrix_indices().cbegin(),
                                op_problem.get_constraint_matrix_indices().cend(),
-                               [n_variables = op_problem.get_n_variables()] __device__(
-                                 i_t val) -> bool { return val >= 0 && val < n_variables; }),
+                               [n_variables = op_problem.get_n_variables()] __device__(i_t val) {
+                                 return val >= 0 && val < n_variables;
+                               }),
                 error_type_t::ValidationError,
                 "A_indices values must positive lower than the number of variables (c size).");
 }
@@ -71,7 +80,7 @@ void problem_checking_t<i_t, f_t>::check_initial_primal_representation(
                                   [lower_bounds = make_span(op_problem.get_variable_lower_bounds()),
                                    upper_bounds = make_span(op_problem.get_variable_upper_bounds()),
                                    assignment_span = make_span(primal_initial_solution),
-                                   int_tol         = 1e-8] __device__(i_t idx) -> bool {
+                                   int_tol         = 1e-8] __device__(i_t idx) {
                                     return assignment_span[idx] < lower_bounds[idx] - int_tol ||
                                            assignment_span[idx] > upper_bounds[idx] + int_tol;
                                   }),
@@ -170,14 +179,13 @@ void problem_checking_t<i_t, f_t>::check_problem_representation(
 
   // Check row type if set
   if (!op_problem.get_row_types().is_empty()) {
-    cuopt_expects(thrust::all_of(op_problem.get_handle_ptr()->get_thrust_policy(),
-                                 op_problem.get_row_types().cbegin(),
-                                 op_problem.get_row_types().cend(),
-                                 [] __device__(char val) -> bool {
-                                   return val == 'E' || val == 'G' || val == 'L';
-                                 }),
-                  error_type_t::ValidationError,
-                  "row_types values must equal to 'E', 'G' or 'L'.");
+    cuopt_expects(
+      thrust::all_of(op_problem.get_handle_ptr()->get_thrust_policy(),
+                     op_problem.get_row_types().cbegin(),
+                     op_problem.get_row_types().cend(),
+                     [] __device__(char val) { return val == 'E' || val == 'G' || val == 'L'; }),
+      error_type_t::ValidationError,
+      "row_types values must equal to 'E', 'G' or 'L'.");
 
     cuopt_expects(
       op_problem.get_row_types().size() == op_problem.get_constraint_bounds().size(),
@@ -255,16 +263,21 @@ template <typename i_t, typename f_t>
 void problem_checking_t<i_t, f_t>::check_scaled_problem(
   detail::problem_t<i_t, f_t> const& scaled_problem, detail::problem_t<i_t, f_t> const& op_problem)
 {
-  using f_t2 = typename type_2<f_t>::type;
   // original problem to host
-  auto& d_variable_bounds = op_problem.variable_bounds;
-  auto& d_variable_types  = op_problem.variable_types;
-  std::vector<f_t2> variable_bounds(d_variable_bounds.size());
+  auto& d_variable_upper_bounds = op_problem.variable_upper_bounds;
+  auto& d_variable_lower_bounds = op_problem.variable_lower_bounds;
+  auto& d_variable_types        = op_problem.variable_types;
+  std::vector<f_t> variable_upper_bounds(d_variable_upper_bounds.size());
+  std::vector<f_t> variable_lower_bounds(d_variable_lower_bounds.size());
   std::vector<var_t> variable_types(d_variable_types.size());
 
-  raft::copy(variable_bounds.data(),
-             d_variable_bounds.data(),
-             d_variable_bounds.size(),
+  raft::copy(variable_upper_bounds.data(),
+             d_variable_upper_bounds.data(),
+             d_variable_upper_bounds.size(),
+             op_problem.handle_ptr->get_stream());
+  raft::copy(variable_lower_bounds.data(),
+             d_variable_lower_bounds.data(),
+             d_variable_lower_bounds.size(),
              op_problem.handle_ptr->get_stream());
   raft::copy(variable_types.data(),
              d_variable_types.data(),
@@ -272,20 +285,26 @@ void problem_checking_t<i_t, f_t>::check_scaled_problem(
              op_problem.handle_ptr->get_stream());
 
   // scaled problem to host
-  std::vector<f_t2> scaled_variable_bounds(scaled_problem.variable_bounds.size());
+  std::vector<f_t> scaled_variable_upper_bounds(scaled_problem.variable_upper_bounds.size());
+  std::vector<f_t> scaled_variable_lower_bounds(scaled_problem.variable_lower_bounds.size());
+  std::vector<f_t> scaled_variables(scaled_problem.variable_lower_bounds.size());
 
-  raft::copy(scaled_variable_bounds.data(),
-             scaled_problem.variable_bounds.data(),
-             scaled_problem.variable_bounds.size(),
+  raft::copy(scaled_variable_upper_bounds.data(),
+             scaled_problem.variable_upper_bounds.data(),
+             scaled_problem.variable_upper_bounds.size(),
+             op_problem.handle_ptr->get_stream());
+  raft::copy(scaled_variable_lower_bounds.data(),
+             scaled_problem.variable_lower_bounds.data(),
+             scaled_problem.variable_lower_bounds.size(),
              op_problem.handle_ptr->get_stream());
   for (size_t i = 0; i < variable_types.size(); ++i) {
     auto var_type = variable_types[i];
     if (var_type == var_t::INTEGER) {
       // Integers should be untouched
-      cuopt_assert(get_lower(variable_bounds[i]) == get_lower(scaled_variable_bounds[i]),
-                   "Mismatch lower scaling");
-      cuopt_assert(get_upper(variable_bounds[i]) == get_upper(scaled_variable_bounds[i]),
+      cuopt_assert(variable_upper_bounds[i] == scaled_variable_upper_bounds[i],
                    "Mismatch upper scaling");
+      cuopt_assert(variable_lower_bounds[i] == scaled_variable_lower_bounds[i],
+                   "Mismatch lower scaling");
     }
   }
 }
@@ -294,48 +313,27 @@ template <typename i_t, typename f_t>
 void problem_checking_t<i_t, f_t>::check_unscaled_solution(
   detail::problem_t<i_t, f_t>& op_problem, rmm::device_uvector<f_t> const& assignment)
 {
-  using f_t2              = typename type_2<f_t>::type;
-  auto& d_variable_bounds = op_problem.variable_bounds;
-  std::vector<f_t2> variable_bounds(d_variable_bounds.size());
+  auto& d_variable_upper_bounds = op_problem.variable_upper_bounds;
+  auto& d_variable_lower_bounds = op_problem.variable_lower_bounds;
+  std::vector<f_t> variable_upper_bounds(d_variable_upper_bounds.size());
+  std::vector<f_t> variable_lower_bounds(d_variable_lower_bounds.size());
   std::vector<f_t> h_assignment(assignment.size());
 
-  raft::copy(variable_bounds.data(),
-             d_variable_bounds.data(),
-             d_variable_bounds.size(),
+  raft::copy(variable_upper_bounds.data(),
+             d_variable_upper_bounds.data(),
+             d_variable_upper_bounds.size(),
+             op_problem.handle_ptr->get_stream());
+  raft::copy(variable_lower_bounds.data(),
+             d_variable_lower_bounds.data(),
+             d_variable_lower_bounds.size(),
              op_problem.handle_ptr->get_stream());
   raft::copy(
     h_assignment.data(), assignment.data(), assignment.size(), op_problem.handle_ptr->get_stream());
   const f_t int_tol = op_problem.tolerances.integrality_tolerance;
-  for (size_t i = 0; i < variable_bounds.size(); ++i) {
-    cuopt_assert(h_assignment[i] >= get_lower(variable_bounds[i]) - int_tol, "Excess lower bound");
-    cuopt_assert(h_assignment[i] <= get_upper(variable_bounds[i]) + int_tol, "Excess upper bound");
+  for (size_t i = 0; i < variable_upper_bounds.size(); ++i) {
+    cuopt_assert(h_assignment[i] <= variable_upper_bounds[i] + int_tol, "Excess upper bound");
+    cuopt_assert(h_assignment[i] >= variable_lower_bounds[i] - int_tol, "Excess lower bound");
   }
-}
-
-template <typename i_t, typename f_t>
-bool problem_checking_t<i_t, f_t>::has_crossing_bounds(
-  const optimization_problem_t<i_t, f_t>& op_problem)
-{
-  // Check if all variable bounds are valid (upper >= lower)
-  bool all_variable_bounds_valid = thrust::all_of(
-    op_problem.get_handle_ptr()->get_thrust_policy(),
-    thrust::make_counting_iterator(0),
-    thrust::make_counting_iterator(0) + op_problem.get_variable_upper_bounds().size(),
-    [upper_bounds = make_span(op_problem.get_variable_upper_bounds()),
-     lower_bounds = make_span(op_problem.get_variable_lower_bounds())] __device__(size_t i)
-      -> bool { return upper_bounds[i] >= lower_bounds[i]; });
-
-  // Check if all constraint bounds are valid (upper >= lower)
-  bool all_constraint_bounds_valid = thrust::all_of(
-    op_problem.get_handle_ptr()->get_thrust_policy(),
-    thrust::make_counting_iterator(0),
-    thrust::make_counting_iterator(0) + op_problem.get_constraint_upper_bounds().size(),
-    [upper_bounds = make_span(op_problem.get_constraint_upper_bounds()),
-     lower_bounds = make_span(op_problem.get_constraint_lower_bounds())] __device__(size_t i)
-      -> bool { return upper_bounds[i] >= lower_bounds[i]; });
-
-  // Return true if any bounds are invalid (crossing)
-  return !all_variable_bounds_valid || !all_constraint_bounds_valid;
 }
 
 #define INSTANTIATE(F_TYPE) template class problem_checking_t<int, F_TYPE>;

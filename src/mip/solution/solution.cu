@@ -1,9 +1,19 @@
-/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights
+ * reserved. SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-/* clang-format on */
 
 #include "feasibility_test.cuh"
 #include "solution.cuh"
@@ -25,25 +35,11 @@
 
 namespace cuopt::linear_programming::detail {
 
-template <typename f_t>
-rmm::device_uvector<f_t> get_lower_bounds(
-  rmm::device_uvector<typename type_2<f_t>::type> const& bounds, const raft::handle_t* handle_ptr)
-{
-  using f_t2 = typename type_2<f_t>::type;
-  rmm::device_uvector<f_t> lower_bounds(bounds.size(), handle_ptr->get_stream());
-  thrust::transform(handle_ptr->get_thrust_policy(),
-                    bounds.begin(),
-                    bounds.end(),
-                    lower_bounds.begin(),
-                    [] __device__(auto bnd) { return bnd.x; });
-  return lower_bounds;
-}
-
 template <typename i_t, typename f_t>
 solution_t<i_t, f_t>::solution_t(problem_t<i_t, f_t>& problem_)
   : problem_ptr(&problem_),
     handle_ptr(problem_.handle_ptr),
-    assignment(std::move(get_lower_bounds<f_t>(problem_.variable_bounds, handle_ptr))),
+    assignment(problem_.variable_lower_bounds, handle_ptr->get_stream()),
     lower_excess(problem_.n_constraints, handle_ptr->get_stream()),
     upper_excess(problem_.n_constraints, handle_ptr->get_stream()),
     lower_slack(problem_.n_constraints, handle_ptr->get_stream()),
@@ -53,7 +49,6 @@ solution_t<i_t, f_t>::solution_t(problem_t<i_t, f_t>& problem_)
     n_feasible_constraints(handle_ptr->get_stream()),
     lp_state(problem_)
 {
-  clamp_within_var_bounds(assignment, problem_ptr, handle_ptr);
 }
 
 template <typename i_t, typename f_t>
@@ -218,13 +213,6 @@ void solution_t<i_t, f_t>::copy_new_assignment(const std::vector<f_t>& h_assignm
 }
 
 template <typename i_t, typename f_t>
-void solution_t<i_t, f_t>::copy_new_assignment(const rmm::device_uvector<f_t>& d_assignment)
-{
-  assignment.resize(d_assignment.size(), handle_ptr->get_stream());
-  raft::copy(assignment.data(), d_assignment.data(), d_assignment.size(), handle_ptr->get_stream());
-}
-
-template <typename i_t, typename f_t>
 void solution_t<i_t, f_t>::assign_random_within_bounds(f_t ratio_of_vars_to_random_assign,
                                                        bool only_integers)
 {
@@ -232,16 +220,16 @@ void solution_t<i_t, f_t>::assign_random_within_bounds(f_t ratio_of_vars_to_rand
   std::vector<f_t> h_assignment = host_copy(assignment);
   std::uniform_real_distribution<f_t> unif_prob(0, 1);
 
-  auto variable_bounds = cuopt::host_copy(problem_ptr->variable_bounds);
-  auto variable_types  = cuopt::host_copy(problem_ptr->variable_types);
+  auto variable_lower_bounds = cuopt::host_copy(problem_ptr->variable_lower_bounds);
+  auto variable_upper_bounds = cuopt::host_copy(problem_ptr->variable_upper_bounds);
+  auto variable_types        = cuopt::host_copy(problem_ptr->variable_types);
   problem_ptr->handle_ptr->sync_stream();
-  for (size_t i = 0; i < problem_ptr->variable_bounds.size(); ++i) {
+  for (size_t i = 0; i < problem_ptr->variable_lower_bounds.size(); ++i) {
     if (only_integers && variable_types[i] != var_t::INTEGER) { continue; }
     bool skip = unif_prob(rng) > ratio_of_vars_to_random_assign;
     if (skip) { continue; }
-    auto var_bounds  = variable_bounds[i];
-    auto lower_bound = get_lower(var_bounds);
-    auto upper_bound = get_upper(var_bounds);
+    f_t lower_bound = variable_lower_bounds[i];
+    f_t upper_bound = variable_upper_bounds[i];
     if (lower_bound == -std::numeric_limits<f_t>::infinity()) {
       h_assignment[i] = upper_bound;
     } else if (upper_bound == std::numeric_limits<f_t>::infinity()) {
@@ -284,13 +272,6 @@ template <typename i_t, typename f_t>
 void solution_t<i_t, f_t>::compute_constraints()
 {
   if (problem_ptr->n_constraints == 0) { return; }
-
-  cuopt_assert(problem_ptr->n_constraints == problem_ptr->constraint_upper_bounds.size(),
-               "invalid assignment size");
-  // TODO: investigate why sometimes the sizes are incorrectly set before the kernel call
-  constraint_value.resize(problem_ptr->n_constraints, handle_ptr->get_stream());
-  lower_excess.resize(problem_ptr->n_constraints, handle_ptr->get_stream());
-  upper_excess.resize(problem_ptr->n_constraints, handle_ptr->get_stream());
 
   i_t TPB = 64;
   compute_constraint_values<i_t, f_t>
@@ -341,7 +322,7 @@ template <typename i_t, typename f_t>
 void solution_t<i_t, f_t>::compute_objective()
 {
   h_obj = compute_objective_from_vec<i_t, f_t>(
-    assignment, problem_ptr->objective_coefficients, handle_ptr);
+    assignment, problem_ptr->objective_coefficients, handle_ptr->get_stream());
   // to save from memory transactions, don't update the device objective
   // when needed we can update the device objective here
   h_user_obj = problem_ptr->get_user_obj_from_solver_obj(h_obj);
@@ -366,30 +347,14 @@ void solution_t<i_t, f_t>::compute_infeasibility()
 template <typename i_t, typename f_t>
 bool solution_t<i_t, f_t>::round_nearest()
 {
-  clamp_within_bounds();
   invoke_round_nearest(*this);
-  cuopt_assert(compute_max_variable_violation() == 0., "Variables are not within bounds");
-  cuopt_assert(test_number_all_integer(), "Not all variables are integers");
   return compute_feasibility();
 }
 
 template <typename i_t, typename f_t>
 bool solution_t<i_t, f_t>::round_random_nearest(i_t n_target_random_rounds)
 {
-  clamp_within_bounds();
   invoke_random_round_nearest(*this, n_target_random_rounds);
-  cuopt_assert(compute_max_variable_violation() == 0., "Variables are not within bounds");
-  cuopt_assert(test_number_all_integer(), "Not all variables are integers");
-  return compute_feasibility();
-}
-
-template <typename i_t, typename f_t>
-bool solution_t<i_t, f_t>::round_simple()
-{
-  clamp_within_bounds();
-  invoke_simple_rounding(*this);
-  cuopt_assert(compute_max_variable_violation() == 0., "Variables are not within bounds");
-  cuopt_assert(test_number_all_integer(), "Not all variables are integers");
   return compute_feasibility();
 }
 
@@ -463,7 +428,6 @@ void solution_t<i_t, f_t>::clamp_within_bounds()
   clamp_within_var_bounds(assignment, problem_ptr, handle_ptr);
   handle_ptr->sync_stream();
   compute_feasibility();
-  cuopt_assert(compute_max_variable_violation() == 0., "Variables are not within bounds");
 }
 
 template <typename i_t, typename f_t>
@@ -479,11 +443,10 @@ i_t solution_t<i_t, f_t>::calculate_similarity_radius(solution_t<i_t, f_t>& othe
     problem_ptr->integer_indices.end(),
     cuda::proclaim_return_type<bool>(
       [other_ptr, curr_assignment, p_view = problem_ptr->view()] __device__(i_t idx) -> bool {
-        auto var_bounds = p_view.variable_bounds[idx];
         return diverse_equal<f_t>(other_ptr[idx],
                                   curr_assignment[idx],
-                                  get_lower(var_bounds),
-                                  get_upper(var_bounds),
+                                  p_view.variable_lower_bounds[idx],
+                                  p_view.variable_upper_bounds[idx],
                                   p_view.is_integer_var(idx),
                                   p_view.tolerances.integrality_tolerance);
       }));
@@ -579,15 +542,17 @@ template <typename i_t, typename f_t>
 f_t solution_t<i_t, f_t>::compute_max_variable_violation()
 {
   cuopt_assert(problem_ptr->n_variables == assignment.size(), "Size mismatch");
-  cuopt_assert(problem_ptr->n_variables == problem_ptr->variable_bounds.size(), "Size mismatch");
+  cuopt_assert(problem_ptr->n_variables == problem_ptr->variable_lower_bounds.size(),
+               "Size mismatch");
+  cuopt_assert(problem_ptr->n_variables == problem_ptr->variable_upper_bounds.size(),
+               "Size mismatch");
   return thrust::transform_reduce(
     handle_ptr->get_thrust_policy(),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(0) + problem_ptr->n_variables,
     cuda::proclaim_return_type<f_t>([v = view()] __device__(i_t idx) -> f_t {
-      auto var_bounds = v.problem.variable_bounds[idx];
-      f_t lower_vio   = max(0., get_lower(var_bounds) - v.assignment[idx]);
-      f_t upper_vio   = max(0., v.assignment[idx] - get_upper(var_bounds));
+      f_t lower_vio = max(0., v.problem.variable_lower_bounds[idx] - v.assignment[idx]);
+      f_t upper_vio = max(0., v.assignment[idx] - v.problem.variable_upper_bounds[idx]);
       return max(lower_vio, upper_vio);
     }),
     0.,
@@ -597,8 +562,7 @@ f_t solution_t<i_t, f_t>::compute_max_variable_violation()
 // returns the solution after applying the conversions
 template <typename i_t, typename f_t>
 mip_solution_t<i_t, f_t> solution_t<i_t, f_t>::get_solution(bool output_feasible,
-                                                            solver_stats_t<i_t, f_t> stats,
-                                                            bool log_stats)
+                                                            solver_stats_t<i_t, f_t> stats)
 {
   cuopt::default_logger().flush();
   cuopt_expects(
@@ -617,23 +581,22 @@ mip_solution_t<i_t, f_t> solution_t<i_t, f_t>::get_solution(bool output_feasible
     i_t num_nodes                    = stats.num_nodes;
     i_t num_simplex_iterations       = stats.num_simplex_iterations;
     handle_ptr->sync_stream();
-    if (log_stats) {
-      CUOPT_LOG_INFO(
-        "Solution objective: %f , relative_mip_gap %f solution_bound %f presolve_time %f "
-        "total_solve_time %f "
-        "max constraint violation %f max int violation %f max var bounds violation %f "
-        "nodes %d simplex_iterations %d",
-        h_user_obj,
-        rel_mip_gap,
-        solution_bound,
-        presolve_time,
-        total_solve_time,
-        max_constraint_violation,
-        max_int_violation,
-        max_variable_bound_violation,
-        num_nodes,
-        num_simplex_iterations);
-    }
+    CUOPT_LOG_INFO(
+      "Solution objective: %f , relative_mip_gap %f solution_bound %f presolve_time %f "
+      "total_solve_time %f "
+      "max constraint violation %f max int violation %f max var bounds violation %f "
+      "nodes %d simplex_iterations %d",
+      h_user_obj,
+      rel_mip_gap,
+      solution_bound,
+      presolve_time,
+      total_solve_time,
+      max_constraint_violation,
+      max_int_violation,
+      max_variable_bound_violation,
+      num_nodes,
+      num_simplex_iterations);
+
     const bool not_optimal = rel_mip_gap > problem_ptr->tolerances.relative_mip_gap &&
                              abs_mip_gap > problem_ptr->tolerances.absolute_mip_gap;
     auto term_reason =

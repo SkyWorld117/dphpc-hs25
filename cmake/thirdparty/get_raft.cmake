@@ -1,15 +1,26 @@
-# cmake-format: off
 # SPDX-FileCopyrightText: Copyright (c) 2021-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# cmake-format: on
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-set(CUOPT_MIN_VERSION_raft "${RAPIDS_VERSION_MAJOR}.${RAPIDS_VERSION_MINOR}.00")
+set(CUOPT_MIN_VERSION_raft "${DEPENDENT_LIB_MAJOR_VERSION}.${DEPENDENT_LIB_MINOR_VERSION}.00")
+set(CUOPT_BRANCH_VERSION_raft "${DEPENDENT_LIB_MAJOR_VERSION}.${DEPENDENT_LIB_MINOR_VERSION}")
 
 function(find_and_configure_raft)
     set(oneValueArgs VERSION FORK PINNED_TAG CLONE_ON_PIN)
     cmake_parse_arguments(PKG "" "${oneValueArgs}" "" ${ARGN})
 
-    if(PKG_CLONE_ON_PIN AND NOT PKG_PINNED_TAG STREQUAL "${rapids-cmake-checkout-tag}")
+    if(PKG_CLONE_ON_PIN AND NOT PKG_PINNED_TAG STREQUAL "branch-${CUOPT_BRANCH_VERSION_raft}")
         message("Pinned tag found: ${PKG_PINNED_TAG}. Cloning raft locally.")
         set(CPM_DOWNLOAD_raft ON)
     endif()
@@ -37,9 +48,10 @@ endfunction()
 
 # Change pinned tag and fork here to test a commit in CI
 # To use a different RAFT locally, set the CMake variable
-# CPM_raft_SOURCE=/path/to/local/raft
+# RPM_raft_SOURCE=/path/to/local/raft
+set(CUOPT_MIN_VERSION_raft "${DEPENDENT_LIB_MAJOR_VERSION}.${DEPENDENT_LIB_MINOR_VERSION}.00")
 find_and_configure_raft(VERSION ${CUOPT_MIN_VERSION_raft}
     FORK rapidsai
-    PINNED_TAG ${rapids-cmake-checkout-tag}
+    PINNED_TAG branch-${CUOPT_BRANCH_VERSION_raft}
     CLONE_ON_PIN ON
 )

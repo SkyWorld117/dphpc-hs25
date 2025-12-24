@@ -1,15 +1,26 @@
-/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights
+ * reserved. SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-/* clang-format on */
 
 #pragma once
 
 #include <mip/feasibility_jump/feasibility_jump.cuh>
 #include <mip/local_search/line_segment_search/line_segment_search.cuh>
 #include <mip/local_search/rounding/constraint_prop.cuh>
+#include <mip/local_search/rounding/lb_constraint_prop.cuh>
 #include <mip/solution/solution.cuh>
 #include <utilities/timer.hpp>
 
@@ -107,6 +118,7 @@ class feasibility_pump_t {
                      fj_t<i_t, f_t>& fj,
                      //                     fj_tree_t<i_t, f_t>& fj_tree_,
                      constraint_prop_t<i_t, f_t>& constraint_prop_,
+                     lb_constraint_prop_t<i_t, f_t>& lb_constraint_prop_,
                      line_segment_search_t<i_t, f_t>& line_segment_search_,
                      rmm::device_uvector<f_t>& lp_optimal_solution_);
 
@@ -127,6 +139,7 @@ class feasibility_pump_t {
   bool check_distance_cycle(solution_t<i_t, f_t>& solution);
   void reset();
   void resize_vectors(problem_t<i_t, f_t>& problem, const raft::handle_t* handle_ptr);
+  void save_best_excess_solution(solution_t<i_t, f_t>& solution);
   bool random_round_with_fj(solution_t<i_t, f_t>& solution, timer_t& round_timer);
   bool round_multiple_points(solution_t<i_t, f_t>& solution);
   void relax_general_integers(solution_t<i_t, f_t>& solution);
@@ -140,11 +153,13 @@ class feasibility_pump_t {
   line_segment_search_t<i_t, f_t>& line_segment_search;
   cycle_queue_t<i_t, f_t> cycle_queue;
   constraint_prop_t<i_t, f_t>& constraint_prop;
+  lb_constraint_prop_t<i_t, f_t>& lb_constraint_prop;
   fp_config_t config;
   rmm::device_uvector<f_t> last_rounding;
   rmm::device_uvector<f_t> last_projection;
   rmm::device_uvector<var_t> orig_variable_types;
   f_t best_excess;
+  rmm::device_uvector<f_t> best_excess_solution;
   rmm::device_uvector<f_t>& lp_optimal_solution;
   std::mt19937 rng;
   std::deque<f_t> last_distances;
@@ -154,7 +169,8 @@ class feasibility_pump_t {
   f_t proj_and_round_time;
   f_t proj_begin;
   i_t n_fj_single_descents;
-  i_t max_n_of_integers = 0;
+  i_t max_n_of_integers      = 0;
+  bool run_intensive_restart = false;
   cuopt::timer_t timer;
 };
 

@@ -1,9 +1,19 @@
-/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights
+ * reserved. SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-/* clang-format on */
 
 #pragma once
 
@@ -54,7 +64,6 @@ class mip_solution_t : public base_solution_t {
   bool is_mip() const override { return true; }
   const rmm::device_uvector<f_t>& get_solution() const;
   rmm::device_uvector<f_t>& get_solution();
-
   f_t get_objective_value() const;
   f_t get_mip_gap() const;
   f_t get_solution_bound() const;
@@ -67,13 +76,11 @@ class mip_solution_t : public base_solution_t {
   f_t get_max_constraint_violation() const;
   f_t get_max_int_violation() const;
   f_t get_max_variable_bound_violation() const;
-  solver_stats_t<i_t, f_t> get_stats() const;
   i_t get_num_nodes() const;
   i_t get_num_simplex_iterations() const;
   const std::vector<std::string>& get_variable_names() const;
   const std::vector<rmm::device_uvector<f_t>>& get_solution_pool() const;
   void write_to_sol_file(std::string_view filename, rmm::cuda_stream_view stream_view) const;
-  void log_summary() const;
 
  private:
   rmm::device_uvector<f_t> solution_;

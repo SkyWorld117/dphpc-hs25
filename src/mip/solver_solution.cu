@@ -1,13 +1,23 @@
-/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights
+ * reserved. SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-/* clang-format on */
 
 #include <cuopt/linear_programming/mip/solver_solution.hpp>
+#include <cuopt/logger.hpp>
 #include <mip/mip_constants.hpp>
-#include <utilities/logger.hpp>
 
 #include <limits>
 #include <math_optimization/solution_writer.hpp>
@@ -168,12 +178,6 @@ f_t mip_solution_t<i_t, f_t>::get_max_variable_bound_violation() const
 }
 
 template <typename i_t, typename f_t>
-solver_stats_t<i_t, f_t> mip_solution_t<i_t, f_t>::get_stats() const
-{
-  return stats_;
-}
-
-template <typename i_t, typename f_t>
 i_t mip_solution_t<i_t, f_t>::get_num_nodes() const
 {
   return stats_.num_nodes;
@@ -217,20 +221,6 @@ void mip_solution_t<i_t, f_t>::write_to_sol_file(std::string_view filename,
 
   solution_writer_t::write_solution_to_sol_file(
     std::string(filename), status, objective_value, var_names, solution);
-}
-
-template <typename i_t, typename f_t>
-void mip_solution_t<i_t, f_t>::log_summary() const
-{
-  CUOPT_LOG_INFO("Termination Status: {}", get_termination_status_string());
-  CUOPT_LOG_INFO("Objective Value: %f", get_objective_value());
-  CUOPT_LOG_INFO("Max constraint violation: %f", get_max_constraint_violation());
-  CUOPT_LOG_INFO("Max integer violation: %f", get_max_int_violation());
-  CUOPT_LOG_INFO("Max variable bound violation: %f", get_max_variable_bound_violation());
-  CUOPT_LOG_INFO("MIP Gap: %f", get_mip_gap());
-  CUOPT_LOG_INFO("Solution Bound: %f", get_solution_bound());
-  CUOPT_LOG_INFO("Presolve Time: %f", get_presolve_time());
-  CUOPT_LOG_INFO("Total Solve Time: %f", get_total_solve_time());
 }
 
 #if MIP_INSTANTIATE_FLOAT

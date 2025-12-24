@@ -1,9 +1,19 @@
-/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION &
+ * AFFILIATES. All rights reserved. SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-/* clang-format on */
 
 #pragma once
 
@@ -32,8 +42,7 @@ enum class problem_category_t : int8_t { LP = 0, MIP = 1, IP = 2 };
  *
  * @tparam f_t  Data type of the variables and their weights in the equations
  *
- * This structure stores all the information necessary to represent the
- * following LP:
+ * This structure stores all the information necessary to represent the following LP:
  *
  * <pre>
  * Minimize:
@@ -52,8 +61,7 @@ enum class problem_category_t : int8_t { LP = 0, MIP = 1, IP = 2 };
  *
  * Objective value can be scaled and offset accordingly:
  * objective_scaling_factor * (dot(c, x) + objective_offset)
- * please refer to the `set_objective_scaling_factor()` and
- * `set_objective_offset()` methods.
+ * please refer to the `set_objective_scaling_factor()` and `set_objective_offset()` methods.
  */
 template <typename i_t, typename f_t>
 class optimization_problem_t {
@@ -186,48 +194,6 @@ class optimization_problem_t {
    * @param objective_offset Objective offset value.
    */
   void set_objective_offset(f_t objective_offset);
-
-  /**
-   * @brief Set the quadratic objective matrix (Q) in CSR format for QPS files.
-   *
-   * @note This is used for quadratic programming problems where the objective
-   * function contains quadratic terms: x^T * Q * x + c^T * x
-   *
-   * @param[in] Q_values Values of the CSR representation of the quadratic objective matrix
-   * @param size_values Size of the Q_values array
-   * @param[in] Q_indices Indices of the CSR representation of the quadratic objective matrix
-   * @param size_indices Size of the Q_indices array
-   * @param[in] Q_offsets Offsets of the CSR representation of the quadratic objective matrix
-   * @param size_offsets Size of the Q_offsets array
-   * @param validate_positive_semi_definite Whether to validate if the matrix is positive semi
-   * definite
-   */
-  void set_quadratic_objective_matrix(const f_t* Q_values,
-                                      i_t size_values,
-                                      const i_t* Q_indices,
-                                      i_t size_indices,
-                                      const i_t* Q_offsets,
-                                      i_t size_offsets,
-                                      bool validate_positive_semi_definite = false);
-
-  /**
-   * @brief Get the quadratic objective matrix offsets
-   * @return const reference to the Q_offsets vector
-   */
-  const std::vector<i_t>& get_quadratic_objective_offsets() const;
-
-  /**
-   * @brief Get the quadratic objective matrix indices
-   * @return const reference to the Q_indices vector
-   */
-  const std::vector<i_t>& get_quadratic_objective_indices() const;
-
-  /**
-   * @brief Get the quadratic objective matrix values
-   * @return const reference to the Q_values vector
-   */
-  const std::vector<f_t>& get_quadratic_objective_values() const;
-
   /**
    * @brief Set the variables (x) lower bounds.
    * @note Setting before calling the solver is optional, default value for all
@@ -336,20 +302,9 @@ class optimization_problem_t {
    */
   void set_row_names(const std::vector<std::string>& row_names);
 
-  /**
-   * @brief Write the problem to an MPS formatted file
-   *
-   * @param[in] mps_file_path Path to the MPS file to write
-   */
-  void write_to_mps(const std::string& mps_file_path);
-
-  /* Print scaling information */
-  void print_scaling_information() const;
-
   i_t get_n_variables() const;
   i_t get_n_constraints() const;
   i_t get_nnz() const;
-  i_t get_n_integers() const;
   raft::handle_t const* get_handle_ptr() const noexcept;
   const rmm::device_uvector<f_t>& get_constraint_matrix_values() const;
   rmm::device_uvector<f_t>& get_constraint_matrix_values();
@@ -374,7 +329,6 @@ class optimization_problem_t {
   const rmm::device_uvector<char>& get_row_types() const;
   const rmm::device_uvector<var_t>& get_variable_types() const;
   bool get_sense() const;
-  bool empty() const;
 
   std::string get_objective_name() const;
   std::string get_problem_name() const;
@@ -382,8 +336,6 @@ class optimization_problem_t {
   problem_category_t get_problem_category() const;
   const std::vector<std::string>& get_variable_names() const;
   const std::vector<std::string>& get_row_names() const;
-
-  bool has_quadratic_objective() const;
 
   /**
    * @brief Gets the device-side view (with raw pointers), for ease of access
@@ -426,12 +378,6 @@ class optimization_problem_t {
   f_t objective_scaling_factor_{1};
   /** offset of the objective function */
   f_t objective_offset_{0};
-
-  /** Quadratic objective matrix in CSR format (for (1/2) * x^T * Q * x term) */
-  std::vector<i_t> Q_offsets_;
-  std::vector<i_t> Q_indices_;
-  std::vector<f_t> Q_values_;
-
   /** lower bounds of the variables (primal part) */
   rmm::device_uvector<f_t> variable_lower_bounds_;
   /** upper bounds of the variables (primal part) */
