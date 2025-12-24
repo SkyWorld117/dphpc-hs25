@@ -1,0 +1,88 @@
+/* clang-format off */
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/* clang-format on */
+
+#pragma once
+
+#include <dual_simplex/basis_updates.hpp>
+#include <dual_simplex/initial_basis.hpp>
+#include <dual_simplex/presolve.hpp>
+#include <dual_simplex/simplex_solver_settings.hpp>
+#include <dual_simplex/types.hpp>
+
+namespace cuopt::linear_programming::dual_simplex {
+
+template <typename i_t, typename f_t>
+bool is_mip(const user_problem_t<i_t, f_t>& problem);
+
+enum class lp_status_t {
+  OPTIMAL          = 0,
+  INFEASIBLE       = 1,
+  UNBOUNDED        = 2,
+  ITERATION_LIMIT  = 3,
+  TIME_LIMIT       = 4,
+  NUMERICAL_ISSUES = 5,
+  CUTOFF           = 6,
+  CONCURRENT_LIMIT = 7,
+  UNSET            = 8
+};
+
+template <typename i_t, typename f_t>
+f_t compute_objective(const lp_problem_t<i_t, f_t>& problem, const std::vector<f_t>& x);
+
+template <typename i_t, typename f_t>
+f_t compute_user_objective(const lp_problem_t<i_t, f_t>& lp, const std::vector<f_t>& x);
+
+template <typename i_t, typename f_t>
+f_t compute_user_objective(const lp_problem_t<i_t, f_t>& lp, f_t obj);
+
+template <typename i_t, typename f_t>
+lp_status_t solve_linear_program_advanced(const lp_problem_t<i_t, f_t>& original_lp,
+                                          const f_t start_time,
+                                          const simplex_solver_settings_t<i_t, f_t>& settings,
+                                          lp_solution_t<i_t, f_t>& original_solution,
+                                          std::vector<variable_status_t>& vstatus,
+                                          std::vector<f_t>& edge_norms);
+
+// Solve the LP using dual simplex and keep the `basis_update_mpf_t`
+// for future use.
+template <typename i_t, typename f_t>
+lp_status_t solve_linear_program_with_advanced_basis(
+  const lp_problem_t<i_t, f_t>& original_lp,
+  const f_t start_time,
+  const simplex_solver_settings_t<i_t, f_t>& settings,
+  lp_solution_t<i_t, f_t>& original_solution,
+  basis_update_mpf_t<i_t, f_t>& ft,
+  std::vector<i_t>& basic_list,
+  std::vector<i_t>& nonbasic_list,
+  std::vector<variable_status_t>& vstatus,
+  std::vector<f_t>& edge_norms);
+
+template <typename i_t, typename f_t>
+lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& user_problem,
+                                              const simplex_solver_settings_t<i_t, f_t>& settings,
+                                              lp_solution_t<i_t, f_t>& solution);
+
+template <typename i_t, typename f_t>
+lp_status_t solve_linear_program(const user_problem_t<i_t, f_t>& user_problem,
+                                 const simplex_solver_settings_t<i_t, f_t>& settings,
+                                 lp_solution_t<i_t, f_t>& solution);
+
+template <typename i_t, typename f_t>
+i_t solve_mip(const user_problem_t<i_t, f_t>& user_problem, mip_solution_t<i_t, f_t>& solution);
+
+template <typename i_t, typename f_t>
+i_t solve_mip_with_guess(const user_problem_t<i_t, f_t>& problem,
+                         const simplex_solver_settings_t<i_t, f_t>& settings,
+                         const std::vector<f_t>& guess,
+                         mip_solution_t<i_t, f_t>& solution);
+
+template <typename i_t, typename f_t>
+i_t solve(const user_problem_t<i_t, f_t>& user_problem,
+          const simplex_solver_settings_t<i_t, f_t>& settings,
+          std::vector<f_t>& primal_solution);
+
+}  // namespace cuopt::linear_programming::dual_simplex
