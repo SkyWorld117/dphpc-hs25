@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-export CUDSS_DIR=/scratch/zyi/MyPackages/libcudss-0.7.1.4
-export TBB_DIR=/scratch/zyi/MyPackages/tbb-2022.3.0
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_BUILD_RPATH="$FROMAGER_ENV/lib;$FROMAGER_ENV/lib64" \
+    -DCMAKE_INSTALL_RPATH="$FROMAGER_ENV/lib;$FROMAGER_ENV/lib64"
 cmake --build build -j
