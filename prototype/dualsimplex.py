@@ -28,7 +28,7 @@ import torch_linalg
 # Device configuration - will use GPU if available
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64  # Use double precision for numerical stability
-SOLVER = "pinv"  # Solver for linear systems ['cg', 'pinv']
+SOLVER = "lu"  # Solver for linear systems ['cg', 'pinv', 'lu']
 
 LOG_FREQ = 200 # Frequency of logging during iterations
 CG_IMPL = "torch"  # Implementation of CG ['torch', 'scipy']
@@ -202,6 +202,103 @@ def _solve_with_conjugate_gradient(B: torch.Tensor, b: torch.Tensor, trans: bool
     else:
         raise ValueError(f"Unknown CG implementation: {CG_IMPL}")
 
+def _compute_lu_factorization(A: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute LU factorization of matrix A using torch.lu."""
+    LU, pivots = torch.linalg.lu_factor(A)
+    return LU, pivots
+
+def _apply_forrest_tomlin_update(LU: torch.Tensor, pivots: torch.Tensor, eta_col: torch.Tensor, pivot_row: int) -> None:
+    """
+    Apply a Forrest--Tomlin style update to an LU factorization when the basis
+    is updated by a single eta column replacement.
+
+    This implementation reconstructs the current basis matrix from the packed
+    `LU` and `pivots`, forms the new basis by replacing column `pivot_row`
+    with `A @ eta_col` (since entering_col = B * eta_col), and then
+    recomputes the LU factorization in-place. This is a robust (but not
+    fully incremental) fallback that preserves the function contract.
+
+    Parameters
+    ----------
+    LU : torch.Tensor
+        Packed LU matrix returned by `torch.linalg.lu_factor` (shape (n,n)).
+    pivots : torch.Tensor
+        Pivot indices returned by `torch.linalg.lu_factor`.
+    eta_col : torch.Tensor
+        Eta column (length n) describing the column replacement in the basis
+        such that entering_col = B @ eta_col.
+    pivot_row : int
+        Index of the column in the basis being replaced.
+    """
+    device = LU.device
+    dtype = LU.dtype
+
+    # Try to unpack LU using torch.linalg.lu_unpack if available
+    try:
+        P, L, U = torch.lu_unpack(LU, pivots)
+        B = P @ (L @ U)
+    except Exception:
+        # Fallback reconstruction from packed LU and pivot indices
+        n = LU.shape[0]
+        # L has unit diagonal and lower-triangular part from LU
+        L = torch.tril(LU, -1).clone()
+        L += torch.eye(n, device=device, dtype=dtype)
+        U = torch.triu(LU).clone()
+
+        # Build permutation matrix P from pivots (pivots are 1-based)
+        P = torch.eye(n, device=device, dtype=dtype)
+        piv = pivots.to(torch.long).cpu().numpy()
+        for i in range(len(piv)):
+            j = int(piv[i]) - 1
+            if j != i:
+                # swap rows i and j
+                P[[i, j], :] = P[[j, i], :]
+
+        B = P @ (L @ U)
+
+    # Compute entering column: entering_col = B @ eta_col
+    entering_col = B @ eta_col
+
+    # Form the updated basis matrix by replacing the pivot_row column
+    B_new = B.clone()
+    B_new[:, pivot_row] = entering_col
+
+    # Recompute LU factorization for the new basis and update in-place
+    LU_new, piv_new = torch.linalg.lu_factor(B_new)
+
+    LU.copy_(LU_new)
+    # piv_new may be int tensor; ensure same dtype and device
+    piv_new_t = piv_new.to(device=device)
+    if pivots.shape != piv_new_t.shape:
+        pivots.resize_(piv_new_t.shape)
+    pivots.copy_(piv_new_t)
+
+def _solve_with_lu(LU: torch.Tensor, pivots: torch.Tensor, b: torch.Tensor, trans: bool = False,
+                  out: torch.Tensor = None) -> torch.Tensor:
+    """Solve linear system using LU factorization."""
+    try:
+        if trans:
+            # Solve A^T x = b where A = PLU
+            # A^T = U^T L^T P^T
+            P, L, U = torch.lu_unpack(LU, pivots)
+            # Step 1: solve U^T w = b (U^T is lower triangular, non-unit diagonal)
+            w = torch.linalg.solve_triangular(U.T, b.unsqueeze(-1), upper=False, unitriangular=False)
+            # Step 2: solve L^T z = w (L^T is upper triangular, unit diagonal)
+            z = torch.linalg.solve_triangular(L.T, w, upper=True, unitriangular=True)
+            # Step 3: x = P z
+            x = P @ z.squeeze(-1)           
+        else:
+            # Solve A x = b
+            x = torch.linalg.lu_solve(LU, pivots, b.unsqueeze(-1)).squeeze(-1)
+
+        if out is not None:
+            out.copy_(x)
+            return out
+        return x
+    except RuntimeError as e:
+        print("Error in LU solve:", e)
+        raise RuntimeError("LU solve failed.") from e
+
 def dualsimplex(
     n: int,
     m: int,
@@ -346,6 +443,8 @@ def dualsimplex(
 
     B_basis = torch.empty((n, n), device=DEVICE, dtype=DTYPE)  # Basis matrix placeholder
     B_inv = torch.empty((n, n), device=DEVICE, dtype=DTYPE)  # Basis inverse placeholder
+    LU = torch.empty((n, n), device=DEVICE, dtype=DTYPE)  # LU factorization placeholder
+    pivots = torch.empty(n, device=DEVICE, dtype=torch.long)  # LU pivot indices placeholder
     
     if SOLVER == "pinv":
         # Get solution using pseudo-inverse
@@ -357,6 +456,19 @@ def dualsimplex(
         # Solve for first N elements of dual solution
         try:
             Y[:n] = _solve_with_inverse(B_inv, C)
+        except RuntimeError:
+            raise DualSimplexError(51)
+
+    elif SOLVER == "lu":
+        # Get solution using LU factorization
+        try:
+            LU, pivots = _compute_lu_factorization(apiv[:, :n])
+        except RuntimeError:
+            raise DualSimplexError(32)
+    
+        # Solve for first N elements of dual solution
+        try:
+            Y[:n] = _solve_with_lu(LU, pivots, C)
         except RuntimeError:
             raise DualSimplexError(51)
 
@@ -380,6 +492,12 @@ def dualsimplex(
         # Get primal solution
         try:
             X = _solve_with_inverse(B_inv, bpiv[:n], trans=True)
+        except RuntimeError:
+            raise DualSimplexError(51)
+    elif SOLVER == "lu":
+        # Get primal solution
+        try:
+            X = _solve_with_lu(LU, pivots, bpiv[:n], trans=True)
         except RuntimeError:
             raise DualSimplexError(51)
     elif SOLVER == "cg":
@@ -423,10 +541,10 @@ def dualsimplex(
         # Choose pivot rule based on improvement
         if oldsol - newsol > eps:
             # Use Dantzig's rule
-            ienter, iexit = _pivot_dantzig(n, m, apiv, Y, S, B_basis, B_inv, eps)
+            ienter, iexit = _pivot_dantzig(n, m, apiv, Y, S, B_basis, B_inv, LU, pivots, eps)
         else:
             # Use Bland's rule
-            ienter, iexit = _pivot_bland(n, m, apiv, Y, S, B_basis, B_inv, eps)
+            ienter, iexit = _pivot_bland(n, m, apiv, Y, S, B_basis, B_inv, LU, pivots, eps)
         # TODO consider using dual steepest edge
         
         if iexit is None:
@@ -436,6 +554,9 @@ def dualsimplex(
         if SOLVER == "pinv":
             # Compute eta column before swapping (reuse buffer)
             _solve_with_inverse(B_inv, apiv[:, ienter], out=eta_col)
+        elif SOLVER == "lu":
+            # Compute eta column before swapping (reuse buffer)
+            _solve_with_lu(LU, pivots, apiv[:, ienter], out=eta_col)
         elif SOLVER == "cg":
             # Use conjugate gradient to solve linear systems
             _solve_with_conjugate_gradient(B_basis, apiv[:, ienter], out=eta_col)
@@ -480,6 +601,35 @@ def dualsimplex(
             # Update primal solution in-place
             try:
                 _solve_with_inverse(B_inv, bpiv[:n], trans=True, out=X)
+            except RuntimeError:
+                raise DualSimplexError(51)
+
+        elif SOLVER == "lu":
+            iters_since_refactor += 1
+            if iters_since_refactor >= refactor_interval:
+                # Full refactorization
+                try:
+                    LU, pivots = _compute_lu_factorization(apiv[:, :n])
+                except RuntimeError:
+                    raise DualSimplexError(41)
+                iters_since_refactor = 0
+            else:
+                # Incremental update using Forrest--Tomlin style update
+                try:
+                    _apply_forrest_tomlin_update(LU, pivots, eta_col, iexit)
+                except RuntimeError:
+                    raise DualSimplexError(41)
+        
+            # Update dual solution (reuse buffer then copy)
+            try:
+                _solve_with_lu(LU, pivots, C, out=Y_n_buf)
+                Y[:n].copy_(Y_n_buf)
+            except RuntimeError:
+                raise DualSimplexError(51)
+            
+            # Update primal solution in-place
+            try:
+                _solve_with_lu(LU, pivots, bpiv[:n], trans=True, out=X)
             except RuntimeError:
                 raise DualSimplexError(51)
 
@@ -537,7 +687,7 @@ def _ensure_pivot_buffers(n: int, device: torch.device):
 
 def _pivot_dantzig(
     n: int, m: int, apiv: torch.Tensor, Y: torch.Tensor, S: torch.Tensor,
-    B_basis:torch.Tensor, B_inv: torch.Tensor, eps: float
+    B_basis:torch.Tensor, B_inv: torch.Tensor, LU: torch.Tensor, pivots: torch.Tensor, eps: float
 ) -> Tuple[int, Optional[int]]:
     """
     Pivot using Dantzig's minimum ratio method for fast convergence.
@@ -550,6 +700,9 @@ def _pivot_dantzig(
     if (SOLVER == "pinv"):
         # Build weight vector using basis inverse (reuse buffer)
         _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
+    elif (SOLVER == "lu"):
+        # Build weight vector using LU factorization (reuse buffer)
+        _solve_with_lu(LU, pivots, apiv[:, ienter], out=_pivot_W)
     elif (SOLVER == "cg"):
         # Use conjugate gradient to solve linear systems
         _solve_with_conjugate_gradient(B_basis, apiv[:, ienter], out=_pivot_W)
@@ -569,7 +722,7 @@ def _pivot_dantzig(
 
 def _pivot_bland(
     n: int, m: int, apiv: torch.Tensor, Y: torch.Tensor, S: torch.Tensor,
-    B_basis:torch.Tensor, B_inv: torch.Tensor, eps: float
+    B_basis:torch.Tensor, B_inv: torch.Tensor, LU: torch.Tensor, pivots: torch.Tensor, eps: float
 ) -> Tuple[int, Optional[int]]:
     """
     Pivot using Bland's anticycling rule for guaranteed convergence.
@@ -586,6 +739,9 @@ def _pivot_bland(
     if (SOLVER == "pinv"):
         # Build weight vector using basis inverse (reuse buffer)
         _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
+    elif (SOLVER == "lu"):
+        # Build weight vector using LU factorization (reuse buffer)
+        _solve_with_lu(LU, pivots, apiv[:, ienter], out=_pivot_W)
     elif (SOLVER == "cg"):
         # Use conjugate gradient to solve linear systems
         _solve_with_conjugate_gradient(B_basis, apiv[:, ienter], out=_pivot_W)
