@@ -20,10 +20,12 @@ PyTorch port: 2024
 import torch
 from torch.profiler import record_function
 from typing import Tuple, Optional
+import scipy
 
 # Device configuration - will use GPU if available
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64  # Use double precision for numerical stability
+SOLVER = "cg"  # Solver for linear systems ['cg', 'pinv']
 
 torch.set_grad_enabled(False)  # Disable autograd for optimization routines
 
@@ -145,6 +147,35 @@ def _solve_with_inverse(B_inv: torch.Tensor, b: torch.Tensor, trans: bool = Fals
         if out is not None:
             return torch.mv(B_inv, b, out=out)
         return B_inv @ b
+
+def _solve_with_conjugate_gradient(B: torch.Tensor, b: torch.Tensor, trans: bool = False,
+                                  out: torch.Tensor = None, maxiter: int = 1000) -> torch.Tensor:
+    """Solve a linear system using conjugate gradient method.
+    Parameters
+    ----------
+    out : torch.Tensor, optional
+        Preallocated output tensor to avoid allocation
+    """
+    # We use CG on a symmetric positive (semi-)definite matrix formed
+    # from the normal equations. To solve B x = b (non-transposed case)
+    # we solve (B^T B) x = B^T b. To solve B^T x = b (transposed case)
+    # we solve (B B^T) x = B b.
+    if trans:
+        A = (B @ B.T).cpu().numpy()
+        rhs = (B @ b).cpu().numpy()
+    else:
+        A = (B.T @ B).cpu().numpy()
+        rhs = (B.T @ b).cpu().numpy()
+
+    x, info = scipy.sparse.linalg.cg(A, rhs, maxiter=maxiter)
+    if info != 0:
+        raise RuntimeError(f"Conjugate gradient did not converge, info={info}")
+
+    x_t = torch.tensor(x, device=DEVICE, dtype=DTYPE)
+    if out is not None:
+        out.copy_(x_t)
+        return out
+    return x_t
 
 
 def dualsimplex(
@@ -288,29 +319,53 @@ def dualsimplex(
     # Initialize solution arrays
     X = torch.zeros(n, device=DEVICE, dtype=DTYPE)
     Y = torch.zeros(m, device=DEVICE, dtype=DTYPE)
+
+    B_inv = torch.empty((n, n), device=DEVICE, dtype=DTYPE)  # Basis inverse placeholder
     
-    # Get solution using pseudo-inverse
-    try:
-        B_inv = _compute_basis_inverse(apiv[:, :n])
-    except RuntimeError:
-        raise DualSimplexError(32)
+    if SOLVER == "pinv":
+        # Get solution using pseudo-inverse
+        try:
+            B_inv = _compute_basis_inverse(apiv[:, :n])
+        except RuntimeError:
+            raise DualSimplexError(32)
     
-    # Solve for first N elements of dual solution
-    try:
-        Y[:n] = _solve_with_inverse(B_inv, C)
-    except RuntimeError:
-        raise DualSimplexError(51)
+        # Solve for first N elements of dual solution
+        try:
+            Y[:n] = _solve_with_inverse(B_inv, C)
+        except RuntimeError:
+            raise DualSimplexError(51)
+
+    elif SOLVER == "cg":
+        # Use conjugate gradient to solve linear systems
+        B_basis = apiv[:, :n]
+        try:
+            Y[:n] = _solve_with_conjugate_gradient(B_basis, C)
+        except RuntimeError:
+            raise DualSimplexError(51)
+
+    else:
+        raise ValueError(f"Unknown solver: {SOLVER}")
     
     if torch.any(Y[:n] < -eps):
         raise DualSimplexError(33)
     
     Y[n:] = 0.0
     
-    # Get primal solution
-    try:
-        X = _solve_with_inverse(B_inv, bpiv[:n], trans=True)
-    except RuntimeError:
-        raise DualSimplexError(51)
+    if SOLVER == "pinv":
+        # Get primal solution
+        try:
+            X = _solve_with_inverse(B_inv, bpiv[:n], trans=True)
+        except RuntimeError:
+            raise DualSimplexError(51)
+    elif SOLVER == "cg":
+        # Use conjugate gradient to solve linear systems
+        B_basis = apiv[:, :n]
+        try:
+            X = _solve_with_conjugate_gradient(B_basis, bpiv[:n], trans=True)
+        except RuntimeError:
+            raise DualSimplexError(51)
+    else:
+        raise ValueError(f"Unknown solver: {SOLVER}")
     
     # Track iterations since last refactorization
     iters_since_refactor = 0
@@ -351,8 +406,15 @@ def dualsimplex(
             # Dual unbounded
             raise DualSimplexError(1)
         
-        # Compute eta column before swapping (reuse buffer)
-        _solve_with_inverse(B_inv, apiv[:, ienter], out=eta_col)
+        if SOLVER == "pinv":
+            # Compute eta column before swapping (reuse buffer)
+            _solve_with_inverse(B_inv, apiv[:, ienter], out=eta_col)
+        elif SOLVER == "cg":
+            # Use conjugate gradient to solve linear systems
+            B_basis = apiv[:, :n]
+            _solve_with_conjugate_gradient(B_basis, apiv[:, ienter], out=eta_col)
+        else:
+            raise ValueError(f"Unknown solver: {SOLVER}")
         
         # Perform pivot using explicit swaps (avoids fancy indexing temporaries)
         _col_buf.copy_(apiv[:, iexit])
@@ -366,33 +428,49 @@ def dualsimplex(
         jpiv[ienter] = tmp_j
         
         # Update basis inverse using eta transformation or recompute
-        iters_since_refactor += 1
-        if iters_since_refactor >= refactor_interval:
-            # Full refactorization
+        if SOLVER == "pinv":
+            iters_since_refactor += 1
+            if iters_since_refactor >= refactor_interval:
+                # Full refactorization
+                try:
+                    B_inv = _compute_basis_inverse(apiv[:, :n])
+                except RuntimeError:
+                    raise DualSimplexError(41)
+                iters_since_refactor = 0
+            else:
+                # Incremental update using eta transformation
+                try:
+                    _apply_eta_update(B_inv, eta_col, iexit, pivot_row_buf)
+                except RuntimeError:
+                    raise DualSimplexError(41)
+        
+            # Update dual solution (reuse buffer then copy)
             try:
-                B_inv = _compute_basis_inverse(apiv[:, :n])
+                _solve_with_inverse(B_inv, C, out=Y_n_buf)
+                Y[:n].copy_(Y_n_buf)
             except RuntimeError:
-                raise DualSimplexError(41)
-            iters_since_refactor = 0
+                raise DualSimplexError(51)
+            
+            # Update primal solution in-place
+            try:
+                _solve_with_inverse(B_inv, bpiv[:n], trans=True, out=X)
+            except RuntimeError:
+                raise DualSimplexError(51)
+
+        elif SOLVER == "cg":
+            # Use conjugate gradient to solve linear systems
+            B_basis = apiv[:, :n]
+            try:
+                _solve_with_conjugate_gradient(B_basis, C, out=Y_n_buf)
+                Y[:n].copy_(Y_n_buf)
+            except RuntimeError:
+                raise DualSimplexError(51)
+            try:
+                _solve_with_conjugate_gradient(B_basis, bpiv[:n], trans=True, out=X)
+            except RuntimeError:
+                raise DualSimplexError(51)
         else:
-            # Incremental update using eta transformation
-            try:
-                _apply_eta_update(B_inv, eta_col, iexit, pivot_row_buf)
-            except RuntimeError:
-                raise DualSimplexError(41)
-        
-        # Update dual solution (reuse buffer then copy)
-        try:
-            _solve_with_inverse(B_inv, C, out=Y_n_buf)
-            Y[:n].copy_(Y_n_buf)
-        except RuntimeError:
-            raise DualSimplexError(51)
-        
-        # Update primal solution in-place
-        try:
-            _solve_with_inverse(B_inv, bpiv[:n], trans=True, out=X)
-        except RuntimeError:
-            raise DualSimplexError(51)
+            raise ValueError(f"Unknown solver: {SOLVER}")
         
         # Update slack variables in-place: S = bpiv[n:] - apiv[:, n:].T @ X
         torch.mv(apiv[:, n:].T, X, out=S)
@@ -439,8 +517,15 @@ def _pivot_dantzig(
     # Entering index: most negative slack
     ienter = torch.argmin(S).item() + n
     
-    # Build weight vector using basis inverse (reuse buffer)
-    _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
+    if (SOLVER == "pinv"):
+        # Build weight vector using basis inverse (reuse buffer)
+        _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
+    elif (SOLVER == "cg"):
+        # Use conjugate gradient to solve linear systems
+        B_basis = apiv[:, :n]
+        _solve_with_conjugate_gradient(B_basis, apiv[:, ienter], out=_pivot_W)
+    else:
+        raise ValueError(f"Unknown solver: {SOLVER}")
     
     # Compute ratios and choose exiting index
     if not torch.any(_pivot_W > eps):
@@ -469,8 +554,15 @@ def _pivot_bland(
     
     ienter = neg_mask.nonzero(as_tuple=True)[0][0].item() + n
     
-    # Build weight vector using basis inverse (reuse buffer)
-    _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
+    if (SOLVER == "pinv"):
+        # Build weight vector using basis inverse (reuse buffer)
+        _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
+    elif (SOLVER == "cg"):
+        # Use conjugate gradient to solve linear systems
+        B_basis = apiv[:, :n]
+        _solve_with_conjugate_gradient(B_basis, apiv[:, ienter], out=_pivot_W)
+    else:
+        raise ValueError(f"Unknown solver: {SOLVER}")
     
     # Compute ratios and choose exiting index
     if not torch.any(_pivot_W > eps):
