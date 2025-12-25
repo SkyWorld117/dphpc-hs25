@@ -20,7 +20,7 @@ from dualsimplex import (
     DEVICE, DTYPE
 )
 
-DEVICE_STR = "cpu"
+DEVICE_STR = "cuda"
 # print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
 
 set_device(DEVICE_STR)
@@ -29,12 +29,14 @@ print(f"Device set to: {get_device()}\n")
 N_VARS = 200
 N_CONSTRAINTS = 400
 
+PROFILE = False
+
 def test_gpu_performance():
     """
     Test GPU performance with larger problems (if GPU available).
     """
     print("=" * 60)
-    print("Test 6: GPU Performance Benchmark")
+    print("GPU Performance Benchmark")
     print("=" * 60)
     
     # Test with a moderately sized problem
@@ -67,7 +69,21 @@ def test_gpu_performance():
         
         # Time GPU solve
 
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+        if PROFILE:
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+                start = time.perf_counter()
+                for _ in range(10):
+                    X, Y, basis, ierr = solve_lp(A, B_full, C)
+                
+                if DEVICE_STR == "cuda":
+                    torch.cuda.synchronize()
+                
+                elapsed = time.perf_counter() - start
+
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+            print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+        else:
             start = time.perf_counter()
             for _ in range(10):
                 X, Y, basis, ierr = solve_lp(A, B_full, C)
@@ -76,10 +92,6 @@ def test_gpu_performance():
                 torch.cuda.synchronize()
             
             elapsed = time.perf_counter() - start
-
-        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-
-        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
         
         print(f"Problem size: {n_vars} variables, {n_constraints + n_vars} constraints")
         print(f"10 solves completed in {elapsed:.4f} seconds")
@@ -197,7 +209,20 @@ def test_sparse_gpu_performance():
             torch.cuda.synchronize()
         
         # Time GPU solve
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+        if PROFILE:
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+                start = time.perf_counter()
+                for _ in range(10):
+                    X, Y, basis, ierr = solve_lp(A, B, C)
+                
+                if DEVICE_STR == "cuda":
+                    torch.cuda.synchronize()
+                
+                elapsed = time.perf_counter() - start
+
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+            print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+        else:
             start = time.perf_counter()
             for _ in range(10):
                 X, Y, basis, ierr = solve_lp(A, B, C)
@@ -206,9 +231,6 @@ def test_sparse_gpu_performance():
                 torch.cuda.synchronize()
             
             elapsed = time.perf_counter() - start
-
-        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
         
         print(f"Problem size: {n_vars} variables, {n_constraints + n_vars} constraints")
         print(f"10 solves completed in {elapsed:.4f} seconds")

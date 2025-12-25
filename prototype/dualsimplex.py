@@ -21,11 +21,16 @@ import torch
 from torch.profiler import record_function
 from typing import Tuple, Optional
 import scipy
+import time
+
+import torch_linalg
 
 # Device configuration - will use GPU if available
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64  # Use double precision for numerical stability
 SOLVER = "cg"  # Solver for linear systems ['cg', 'pinv']
+
+LOG_FREQ = 200 # Frequency of logging during iterations
 
 torch.set_grad_enabled(False)  # Disable autograd for optimization routines
 
@@ -148,6 +153,35 @@ def _solve_with_inverse(B_inv: torch.Tensor, b: torch.Tensor, trans: bool = Fals
             return torch.mv(B_inv, b, out=out)
         return B_inv @ b
 
+# def _solve_with_conjugate_gradient(B: torch.Tensor, b: torch.Tensor, trans: bool = False,
+#                                   out: torch.Tensor = None, maxiter: int = 1000) -> torch.Tensor:
+#     """Solve a linear system using conjugate gradient method.
+#     Parameters
+#     ----------
+#     out : torch.Tensor, optional
+#         Preallocated output tensor to avoid allocation
+#     """
+#     # We use CG on a symmetric positive (semi-)definite matrix formed
+#     # from the normal equations. To solve B x = b (non-transposed case)
+#     # we solve (B^T B) x = B^T b. To solve B^T x = b (transposed case)
+#     # we solve (B B^T) x = B b.
+#     if trans:
+#         A = (B @ B.T).cpu().numpy()
+#         rhs = (B @ b).cpu().numpy()
+#     else:
+#         A = (B.T @ B).cpu().numpy()
+#         rhs = (B.T @ b).cpu().numpy()
+
+#     x, info = scipy.sparse.linalg.cg(A, rhs, maxiter=maxiter)
+#     if info != 0:
+#         raise RuntimeError(f"Conjugate gradient did not converge, info={info}")
+
+#     x_t = torch.tensor(x, device=DEVICE, dtype=DTYPE)
+#     if out is not None:
+#         out.copy_(x_t)
+#         return out
+#     return x_t
+
 def _solve_with_conjugate_gradient(B: torch.Tensor, b: torch.Tensor, trans: bool = False,
                                   out: torch.Tensor = None, maxiter: int = 1000) -> torch.Tensor:
     """Solve a linear system using conjugate gradient method.
@@ -161,22 +195,20 @@ def _solve_with_conjugate_gradient(B: torch.Tensor, b: torch.Tensor, trans: bool
     # we solve (B^T B) x = B^T b. To solve B^T x = b (transposed case)
     # we solve (B B^T) x = B b.
     if trans:
-        A = (B @ B.T).cpu().numpy()
-        rhs = (B @ b).cpu().numpy()
+        A = (B @ B.T)
+        rhs = (B @ b)
     else:
-        A = (B.T @ B).cpu().numpy()
-        rhs = (B.T @ b).cpu().numpy()
+        A = (B.T @ B)
+        rhs = (B.T @ b)
 
-    x, info = scipy.sparse.linalg.cg(A, rhs, maxiter=maxiter)
-    if info != 0:
+    x, info = torch_linalg.CG(A, rhs, max_iter=maxiter)
+    if len(info[1]) > 0 or info[0] == maxiter:
         raise RuntimeError(f"Conjugate gradient did not converge, info={info}")
 
-    x_t = torch.tensor(x, device=DEVICE, dtype=DTYPE)
     if out is not None:
-        out.copy_(x_t)
+        out.copy_(x)
         return out
-    return x_t
-
+    return x
 
 def dualsimplex(
     n: int,
@@ -320,6 +352,7 @@ def dualsimplex(
     X = torch.zeros(n, device=DEVICE, dtype=DTYPE)
     Y = torch.zeros(m, device=DEVICE, dtype=DTYPE)
 
+    B_basis = torch.empty((n, n), device=DEVICE, dtype=DTYPE)  # Basis matrix placeholder
     B_inv = torch.empty((n, n), device=DEVICE, dtype=DTYPE)  # Basis inverse placeholder
     
     if SOLVER == "pinv":
@@ -359,7 +392,6 @@ def dualsimplex(
             raise DualSimplexError(51)
     elif SOLVER == "cg":
         # Use conjugate gradient to solve linear systems
-        B_basis = apiv[:, :n]
         try:
             X = _solve_with_conjugate_gradient(B_basis, bpiv[:n], trans=True)
         except RuntimeError:
@@ -391,15 +423,18 @@ def dualsimplex(
     # Begin iteration
     newsol = torch.dot(bpiv[:n], Y[:n])
     oldsol = newsol + 1.0
+
+    print("Starting dual simplex iterations...")
+    start_time = time.time()
     
     for iteration in range(ibudget):
         # Choose pivot rule based on improvement
         if oldsol - newsol > eps:
             # Use Dantzig's rule
-            ienter, iexit = _pivot_dantzig(n, m, apiv, Y, S, B_inv, eps)
+            ienter, iexit = _pivot_dantzig(n, m, apiv, Y, S, B_basis, B_inv, eps)
         else:
             # Use Bland's rule
-            ienter, iexit = _pivot_bland(n, m, apiv, Y, S, B_inv, eps)
+            ienter, iexit = _pivot_bland(n, m, apiv, Y, S, B_basis, B_inv, eps)
         # TODO consider using dual steepest edge
         
         if iexit is None:
@@ -411,7 +446,6 @@ def dualsimplex(
             _solve_with_inverse(B_inv, apiv[:, ienter], out=eta_col)
         elif SOLVER == "cg":
             # Use conjugate gradient to solve linear systems
-            B_basis = apiv[:, :n]
             _solve_with_conjugate_gradient(B_basis, apiv[:, ienter], out=eta_col)
         else:
             raise ValueError(f"Unknown solver: {SOLVER}")
@@ -459,7 +493,7 @@ def dualsimplex(
 
         elif SOLVER == "cg":
             # Use conjugate gradient to solve linear systems
-            B_basis = apiv[:, :n]
+            B_basis[:, iexit].copy_(apiv[:, iexit])
             try:
                 _solve_with_conjugate_gradient(B_basis, C, out=Y_n_buf)
                 Y[:n].copy_(Y_n_buf)
@@ -482,7 +516,11 @@ def dualsimplex(
             Y_out = torch.zeros(m, device=DEVICE, dtype=DTYPE)
             Y_out.scatter_(0, jpiv, Y)
             obasis = jpiv[:n].clone() if return_basis else None
+            print(f"Dual simplex completed in {iteration+1} iterations, time elapsed = {time.time() - start_time:.2f} seconds")
             return X, Y_out, 0, obasis
+
+        if LOG_FREQ > 0 and iteration % LOG_FREQ == 0:
+            print(f"Iteration {iteration+1}: Current objective value = {torch.dot(bpiv[:n], Y[:n]).item():.6f}, Time elapsed = {time.time() - start_time:.2f} seconds")
         
         # Update solutions
         oldsol = newsol
@@ -507,7 +545,7 @@ def _ensure_pivot_buffers(n: int, device: torch.device):
 
 def _pivot_dantzig(
     n: int, m: int, apiv: torch.Tensor, Y: torch.Tensor, S: torch.Tensor,
-    B_inv: torch.Tensor, eps: float
+    B_basis:torch.Tensor, B_inv: torch.Tensor, eps: float
 ) -> Tuple[int, Optional[int]]:
     """
     Pivot using Dantzig's minimum ratio method for fast convergence.
@@ -515,14 +553,13 @@ def _pivot_dantzig(
     _ensure_pivot_buffers(n, apiv.device)
     
     # Entering index: most negative slack
-    ienter = torch.argmin(S).item() + n
+    ienter = int(torch.argmin(S).item() + n)
     
     if (SOLVER == "pinv"):
         # Build weight vector using basis inverse (reuse buffer)
         _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
     elif (SOLVER == "cg"):
         # Use conjugate gradient to solve linear systems
-        B_basis = apiv[:, :n]
         _solve_with_conjugate_gradient(B_basis, apiv[:, ienter], out=_pivot_W)
     else:
         raise ValueError(f"Unknown solver: {SOLVER}")
@@ -533,14 +570,14 @@ def _pivot_dantzig(
 
     # Compute ratio in-place
     torch.div(Y[:n], _pivot_W, out=_pivot_ratio)
-    iexit = torch.argmin(torch.where(_pivot_W > eps, _pivot_ratio, torch.inf)).item()
+    iexit = int(torch.argmin(torch.where(_pivot_W > eps, _pivot_ratio, torch.inf)).item())
     
     return ienter, iexit
 
 
 def _pivot_bland(
     n: int, m: int, apiv: torch.Tensor, Y: torch.Tensor, S: torch.Tensor,
-    B_inv: torch.Tensor, eps: float
+    B_basis:torch.Tensor, B_inv: torch.Tensor, eps: float
 ) -> Tuple[int, Optional[int]]:
     """
     Pivot using Bland's anticycling rule for guaranteed convergence.
@@ -552,14 +589,13 @@ def _pivot_bland(
     if not torch.any(neg_mask):
         return n, None
     
-    ienter = neg_mask.nonzero(as_tuple=True)[0][0].item() + n
+    ienter = int(neg_mask.nonzero(as_tuple=True)[0][0].item() + n)
     
     if (SOLVER == "pinv"):
         # Build weight vector using basis inverse (reuse buffer)
         _solve_with_inverse(B_inv, apiv[:, ienter], out=_pivot_W)
     elif (SOLVER == "cg"):
         # Use conjugate gradient to solve linear systems
-        B_basis = apiv[:, :n]
         _solve_with_conjugate_gradient(B_basis, apiv[:, ienter], out=_pivot_W)
     else:
         raise ValueError(f"Unknown solver: {SOLVER}")
@@ -570,7 +606,7 @@ def _pivot_bland(
 
     # Compute ratio in-place
     torch.div(Y[:n], _pivot_W, out=_pivot_ratio)
-    iexit = torch.argmin(torch.where(_pivot_W > eps, _pivot_ratio, torch.inf)).item()
+    iexit = int(torch.argmin(torch.where(_pivot_W > eps, _pivot_ratio, torch.inf)).item())
     
     return ienter, iexit
 
