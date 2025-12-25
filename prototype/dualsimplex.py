@@ -28,9 +28,10 @@ import torch_linalg
 # Device configuration - will use GPU if available
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64  # Use double precision for numerical stability
-SOLVER = "cg"  # Solver for linear systems ['cg', 'pinv']
+SOLVER = "pinv"  # Solver for linear systems ['cg', 'pinv']
 
 LOG_FREQ = 200 # Frequency of logging during iterations
+CG_IMPL = "torch"  # Implementation of CG ['torch', 'scipy']
 
 torch.set_grad_enabled(False)  # Disable autograd for optimization routines
 
@@ -153,35 +154,6 @@ def _solve_with_inverse(B_inv: torch.Tensor, b: torch.Tensor, trans: bool = Fals
             return torch.mv(B_inv, b, out=out)
         return B_inv @ b
 
-# def _solve_with_conjugate_gradient(B: torch.Tensor, b: torch.Tensor, trans: bool = False,
-#                                   out: torch.Tensor = None, maxiter: int = 1000) -> torch.Tensor:
-#     """Solve a linear system using conjugate gradient method.
-#     Parameters
-#     ----------
-#     out : torch.Tensor, optional
-#         Preallocated output tensor to avoid allocation
-#     """
-#     # We use CG on a symmetric positive (semi-)definite matrix formed
-#     # from the normal equations. To solve B x = b (non-transposed case)
-#     # we solve (B^T B) x = B^T b. To solve B^T x = b (transposed case)
-#     # we solve (B B^T) x = B b.
-#     if trans:
-#         A = (B @ B.T).cpu().numpy()
-#         rhs = (B @ b).cpu().numpy()
-#     else:
-#         A = (B.T @ B).cpu().numpy()
-#         rhs = (B.T @ b).cpu().numpy()
-
-#     x, info = scipy.sparse.linalg.cg(A, rhs, maxiter=maxiter)
-#     if info != 0:
-#         raise RuntimeError(f"Conjugate gradient did not converge, info={info}")
-
-#     x_t = torch.tensor(x, device=DEVICE, dtype=DTYPE)
-#     if out is not None:
-#         out.copy_(x_t)
-#         return out
-#     return x_t
-
 def _solve_with_conjugate_gradient(B: torch.Tensor, b: torch.Tensor, trans: bool = False,
                                   out: torch.Tensor = None, maxiter: int = 1000) -> torch.Tensor:
     """Solve a linear system using conjugate gradient method.
@@ -194,21 +166,41 @@ def _solve_with_conjugate_gradient(B: torch.Tensor, b: torch.Tensor, trans: bool
     # from the normal equations. To solve B x = b (non-transposed case)
     # we solve (B^T B) x = B^T b. To solve B^T x = b (transposed case)
     # we solve (B B^T) x = B b.
-    if trans:
-        A = (B @ B.T)
-        rhs = (B @ b)
+    if CG_IMPL == "scipy":
+        if trans:
+            A = (B @ B.T).cpu().numpy()
+            rhs = (B @ b).cpu().numpy()
+        else:
+            A = (B.T @ B).cpu().numpy()
+            rhs = (B.T @ b).cpu().numpy()
+
+        x, info = scipy.sparse.linalg.cg(A, rhs, maxiter=maxiter)
+        if info != 0:
+            raise RuntimeError(f"Conjugate gradient did not converge, info={info}")
+
+        x_t = torch.tensor(x, device=DEVICE, dtype=DTYPE)
+        if out is not None:
+            out.copy_(x_t)
+            return out
+        return x_t
+    elif CG_IMPL == "torch":
+        if trans:
+            A = (B @ B.T)
+            rhs = (B @ b)
+        else:
+            A = (B.T @ B)
+            rhs = (B.T @ b)
+
+        x, info = torch_linalg.CG(A, rhs, max_iter=maxiter)
+        if len(info[1]) > 0 or info[0] == maxiter:
+            raise RuntimeError(f"Conjugate gradient did not converge, info={info}")
+
+        if out is not None:
+            out.copy_(x)
+            return out
+        return x
     else:
-        A = (B.T @ B)
-        rhs = (B.T @ b)
-
-    x, info = torch_linalg.CG(A, rhs, max_iter=maxiter)
-    if len(info[1]) > 0 or info[0] == maxiter:
-        raise RuntimeError(f"Conjugate gradient did not converge, info={info}")
-
-    if out is not None:
-        out.copy_(x)
-        return out
-    return x
+        raise ValueError(f"Unknown CG implementation: {CG_IMPL}")
 
 def dualsimplex(
     n: int,
