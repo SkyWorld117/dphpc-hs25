@@ -566,12 +566,24 @@ i_t factorize_basis(const csc_matrix_t<i_t, f_t>& A,
   }
   q.resize(m);
   f_t fact_start = tic();
-  right_looking_lu(A, medium_tol, basic_list, q, L, U, pinv);
+  rank = right_looking_lu(A, medium_tol, basic_list, q, L, U, pinv);
+  inverse_permutation(pinv, p);
+  if (rank != m) {
+    // Get the deficient columns
+    deficient.clear();
+    deficient.resize(m - rank);
+    for (i_t h = rank; h < m; ++h) {
+      deficient[h - rank] = q[h];
+    }
+    // Get the slacks needed
+    slacks_needed.resize(m - rank);
+    for (i_t h = rank; h < m; ++h) {
+      slacks_needed[h - rank] = p[h];
+    }
+  }
   if (verbose) {
     printf("Right Lnz+Unz %d t %.3f\n", L.col_start[m] + U.col_start[m], toc(fact_start));
   }
-  inverse_permutation(pinv, p);
-  rank                    = m;
   constexpr bool check_lu = false;
   if (check_lu) {
     csc_matrix_t<i_t, f_t> C(m, m, 1);
