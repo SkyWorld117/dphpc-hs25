@@ -11,6 +11,8 @@
 #include <dual_simplex/simplex_solver_settings.hpp>
 #include <dual_simplex/solution.hpp>
 
+#include <dual_simplex/highs_presolve.hpp>
+
 #include <argparse/argparse.hpp>
 
 #include <iostream>
@@ -102,6 +104,8 @@ int main(int argc, char* argv[]) {
         .help("path to an initial .sol file");
     program.add_argument("--relaxation").default_value(false).implicit_value(true)
         .help("solve LP relaxation (if MIP)");
+    program.add_argument("--highs-presolve").default_value(false).implicit_value(true)
+        .help("use HiGHS presolve instead of built-in presolve");
 
     try {
         program.parse_args(argc, argv);
@@ -114,27 +118,35 @@ int main(int argc, char* argv[]) {
     const std::string file_name = program.get<std::string>("filename");
     const std::string initial_solution_file = program.get<std::string>("--initial-solution");
     const bool solve_relaxation = program.get<bool>("--relaxation");
+    const bool use_highs_presolve = program.get<bool>("--highs-presolve");
 
-    // Parse MPS into host-side model
-    cuopt::mps_parser::mps_data_model_t<int, double> mps;
-    try {
-        mps = cuopt::mps_parser::parse_mps<int, double>(file_name, /*strict=*/false);
-    } catch (const std::exception& e) {
-        std::cerr << "MPS parse error: " << e.what() << std::endl;
-        return 2;
-    }
+    cuopt::linear_programming::dual_simplex::user_problem_t<int, double> user_problem;
+    if (use_highs_presolve) {
+        cuopt::linear_programming::dual_simplex::highs_presolve_t<int, double> presolver;
+        presolver.presolve_from_file(file_name, user_problem);
+    } else {
+        // Parse MPS into host-side model
+        cuopt::mps_parser::mps_data_model_t<int, double> mps;
 
-    // Convert to dual-simplex user_problem (host-only)
-    auto user_problem = mps_to_dual_simplex_user_problem(mps);
-
-    // If an initial solution file is provided, try to read primal values
-    if (!initial_solution_file.empty()) {
         try {
-            auto values = cuopt::linear_programming::solution_reader_t::get_variable_values_from_sol_file(
-                initial_solution_file, mps.get_variable_names());
-            if (!values.empty()) { /* initial values not currently applied to solver here */ }
-        } catch (...) {
-            // ignore read failures — not critical
+            mps = cuopt::mps_parser::parse_mps<int, double>(file_name, /*strict=*/false);
+        } catch (const std::exception& e) {
+            std::cerr << "MPS parse error: " << e.what() << std::endl;
+            return 2;
+        }
+
+        // Convert to dual-simplex user_problem (host-only)
+        user_problem = mps_to_dual_simplex_user_problem(mps);
+
+        // If an initial solution file is provided, try to read primal values
+        if (!initial_solution_file.empty()) {
+            try {
+                auto values = cuopt::linear_programming::solution_reader_t::get_variable_values_from_sol_file(
+                    initial_solution_file, mps.get_variable_names());
+                if (!values.empty()) { /* initial values not currently applied to solver here */ }
+            } catch (...) {
+                // ignore read failures — not critical
+            }
         }
     }
 
@@ -168,6 +180,9 @@ int main(int argc, char* argv[]) {
             break;
         case cuopt::linear_programming::dual_simplex::lp_status_t::ITERATION_LIMIT:
             std::cout << "ITERATION_LIMIT\n";
+            break;
+        case cuopt::linear_programming::dual_simplex::lp_status_t::NUMERICAL_ISSUES:
+            std::cout << "NUMERICAL_ISSUES\n";
             break;
         default:
             std::cout << "OTHER\n";

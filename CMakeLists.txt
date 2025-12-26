@@ -235,6 +235,16 @@ list(PREPEND CUOPT_PRIVATE_CUDA_LIBS CUDA::cublasLt)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libmps_parser)
 set(CMAKE_LIBRARY_PATH ${CMAKE_CURRENT_BINARY_DIR}/libmps_parser/)
 
+# Ensure HiGHS target available: prefer external via HiGHS_DIR, else build local copy
+if(NOT TARGET highs::highs)
+  if(DEFINED HiGHS_DIR)
+    find_package(HiGHS CONFIG REQUIRED PATHS ${HiGHS_DIR})
+  elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/HiGHS")
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/HiGHS")
+  else()
+    message(FATAL_ERROR "HiGHS library not found. Set -DHiGHS_DIR or add a HiGHS subdirectory.")
+  endif()
+endif()
 
 target_link_libraries(cuopt
   PUBLIC
@@ -245,6 +255,7 @@ target_link_libraries(cuopt
   CCCL::CCCL
   raft::raft
   cuopt::mps_parser
+  highs::highs
   PRIVATE
   ${CUOPT_PRIVATE_CUDA_LIBS}
   )
