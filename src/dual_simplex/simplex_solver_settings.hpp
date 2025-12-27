@@ -20,6 +20,8 @@
 #include <dual_simplex/logger.hpp>
 #include <dual_simplex/types.hpp>
 
+#include <utilities/high_res_timer.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <functional>
@@ -51,13 +53,13 @@ struct simplex_solver_settings_t {
       use_steepest_edge_pricing(true),
       use_harris_ratio(false),
       use_bound_flip_ratio(true),
-      use_perturbation(false),
       scale_columns(true),
       relaxation(false),
       use_left_looking_lu(false),
       eliminate_singletons(true),
       print_presolve_stats(true),
       refactor_frequency(100),
+      profile(false),
       iteration_log_frequency(1000),
       first_iteration_log(2),
       num_threads(std::thread::hardware_concurrency() > 8
@@ -101,7 +103,7 @@ struct simplex_solver_settings_t {
   bool use_left_looking_lu;        // true to use left looking LU factorization, false to use right looking
   bool eliminate_singletons;       // true to eliminate singletons from the basis
   bool print_presolve_stats;       // true to print presolve stats
-  bool use_perturbation;           // true to use initial perturbation
+  bool profile;                    // true to enable profiling
   i_t refactor_frequency;          // number of basis updates before refactorization
   i_t iteration_log_frequency;     // number of iterations between log updates
   i_t first_iteration_log;         // number of iterations to log at beginning of solve
@@ -112,6 +114,7 @@ struct simplex_solver_settings_t {
   std::function<void()> heuristic_preemption_callback;
   std::function<void(std::vector<f_t>&, f_t)> set_simplex_solution_callback;
   mutable logger_t log;
+  mutable HighResTimer timer;
   std::atomic<i_t>* concurrent_halt;  // if nullptr ignored, if !nullptr, 0 if solver should
                                       // continue, 1 if solver should halt
 };

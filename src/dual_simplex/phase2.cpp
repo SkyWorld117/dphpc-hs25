@@ -2242,10 +2242,6 @@ dual::status_t dual_phase2(i_t phase,
   reorder_basic_list(q, basic_list);
   basis_update_mpf_t<i_t, f_t> ft(L, U, p, settings.refactor_frequency);
 
-  if (settings.use_perturbation) {
-    cuopt::linear_programming::dual_simplex::phase2::initial_perturbation(lp, settings, vstatus, objective);
-  }
-
   std::vector<f_t> c_basic(m);
   for (i_t k = 0; k < m; ++k) {
     const i_t j = basic_list[k];
@@ -2370,7 +2366,7 @@ dual::status_t dual_phase2(i_t phase,
 
   i_t sparse_delta_z = 0;
   i_t dense_delta_z  = 0;
-  phase2::phase2_timers_t<i_t, f_t> timers(false);
+  phase2::phase2_timers_t<i_t, f_t> timers(settings.profile);
 
   while (iter < iter_limit) {
     // Pricing

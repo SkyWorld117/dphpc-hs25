@@ -42,16 +42,17 @@ class HighResTimer {
     timespec start_time;
     clock_gettime(CLOCK_REALTIME, &start_time);
     it->second.second -= start_time.tv_sec * 1000000000 + start_time.tv_nsec;
-
-    open_label = label;
   }
 
-  void stop()
+  void stop(std::string label)
   {
     timespec stop_time;
     clock_gettime(CLOCK_REALTIME, &stop_time);
 
-    auto it = timers.find(open_label);
+    auto it = timers.find(label);
+    if (it == timers.end()) {
+      throw std::runtime_error("ERROR: timing label: " + label + " not found.");
+    }
     it->second.first++;
     it->second.second += stop_time.tv_sec * 1000000000 + stop_time.tv_nsec;
   }
@@ -104,5 +105,4 @@ class HighResTimer {
 
  private:
   std::map<std::string, std::pair<int, int64_t>> timers;
-  std::string open_label;  // should probably be a stack...
 };

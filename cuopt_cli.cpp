@@ -102,10 +102,10 @@ int main(int argc, char* argv[]) {
     program.add_argument("filename").help("input mps file").nargs(1).required();
     program.add_argument("--initial-solution").default_value(std::string(""))
         .help("path to an initial .sol file");
+    program.add_argument("--profile").default_value(false).implicit_value(true)
+        .help("enable profiling");
     program.add_argument("--highs-presolve").default_value(false).implicit_value(true)
         .help("use HiGHS presolve instead of built-in presolve");
-    program.add_argument("--use-perturbation").default_value(false).implicit_value(true)
-        .help("use initial perturbation to improve numerical stability");
 
     try {
         program.parse_args(argc, argv);
@@ -116,6 +116,7 @@ int main(int argc, char* argv[]) {
     }
 
     const std::string file_name = program.get<std::string>("filename");
+    const bool profile_enabled = program.get<bool>("--profile");
     const std::string initial_solution_file = program.get<std::string>("--initial-solution");
     const bool use_highs_presolve = program.get<bool>("--highs-presolve");
 
@@ -151,17 +152,16 @@ int main(int argc, char* argv[]) {
 
     // Prepare solver settings and solution container
     cuopt::linear_programming::dual_simplex::simplex_solver_settings_t<int, double> settings;
-    settings.use_perturbation = program.get<bool>("--use-perturbation");
+    settings.profile = profile_enabled;
 
     cuopt::linear_programming::dual_simplex::lp_solution_t<int, double> solution(
         user_problem.num_rows, user_problem.num_cols);
 
     // Run solver and time it
-    HighResTimer timer;
-    timer.start("Dual Simplex Solve");
+    settings.timer.start("Dual Simplex Solve");
     auto status = cuopt::linear_programming::dual_simplex::solve_linear_program(user_problem, settings, solution);
-    timer.stop();
-    timer.display(std::cout, "Dual Simplex Solve");
+    settings.timer.stop("Dual Simplex Solve");
+    settings.timer.display(std::cout, "Dual Simplex Solve");
 
     std::cout << "Status: ";
     switch (status) {
@@ -192,6 +192,11 @@ int main(int argc, char* argv[]) {
         std::cout << "Objective (user): " << solution.user_objective << "\n";
     }
     std::cout << "Iterations: " << solution.iterations << "\n";
+
+    if (profile_enabled) {
+        std::cout << "=== Profile Summary ===\n";
+        settings.timer.display(std::cout);
+    }
 
     return 0;
 }
