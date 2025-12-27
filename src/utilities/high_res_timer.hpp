@@ -78,7 +78,7 @@ class HighResTimer {
     os << "Timer Results (in ms):" << std::endl;
     for (auto it = timers.begin(); it != timers.end(); ++it) {
       os << "   " << it->first << " called " << it->second.first
-         << " times, average time: " << (it->second.second / (1000000.0 * it->second.first))
+         << " times, average time: " << (it->second.second / (1000000.0 * it->second.first) / 1000.0f)
          << std::endl;
     }
   }
@@ -87,7 +87,7 @@ class HighResTimer {
   {
     auto it = timers.find(label);
     os << it->first << " called " << it->second.first
-       << " times, average time: " << (it->second.second / (1000000.0 * it->second.first))
+       << " times, average time: " << (it->second.second / (1000000.0 * it->second.first) / 1000.0f)
        << std::endl;
   }
 
@@ -96,7 +96,7 @@ class HighResTimer {
     os << "Timer Results (in ms):" << std::endl;
     for (auto it = timers.begin(); it != timers.end(); ++it) {
       os << "   " << it->first << " called " << it->second.first
-         << " times, average time: " << (it->second.second / (1000000.0 * it->second.first))
+         << " times, average time: " << (it->second.second / (1000000.0 * it->second.first) / 1000.0f)
          << std::endl;
     }
 
