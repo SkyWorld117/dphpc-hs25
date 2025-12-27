@@ -102,8 +102,6 @@ int main(int argc, char* argv[]) {
     program.add_argument("filename").help("input mps file").nargs(1).required();
     program.add_argument("--initial-solution").default_value(std::string(""))
         .help("path to an initial .sol file");
-    program.add_argument("--relaxation").default_value(false).implicit_value(true)
-        .help("solve LP relaxation (if MIP)");
     program.add_argument("--highs-presolve").default_value(false).implicit_value(true)
         .help("use HiGHS presolve instead of built-in presolve");
     program.add_argument("--use-perturbation").default_value(false).implicit_value(true)
@@ -119,7 +117,6 @@ int main(int argc, char* argv[]) {
 
     const std::string file_name = program.get<std::string>("filename");
     const std::string initial_solution_file = program.get<std::string>("--initial-solution");
-    const bool solve_relaxation = program.get<bool>("--relaxation");
     const bool use_highs_presolve = program.get<bool>("--highs-presolve");
 
     cuopt::linear_programming::dual_simplex::user_problem_t<int, double> user_problem;
@@ -154,7 +151,6 @@ int main(int argc, char* argv[]) {
 
     // Prepare solver settings and solution container
     cuopt::linear_programming::dual_simplex::simplex_solver_settings_t<int, double> settings;
-    settings.relaxation = solve_relaxation;
     settings.use_perturbation = program.get<bool>("--use-perturbation");
 
     cuopt::linear_programming::dual_simplex::lp_solution_t<int, double> solution(
