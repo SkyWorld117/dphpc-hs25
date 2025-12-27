@@ -106,6 +106,8 @@ int main(int argc, char* argv[]) {
         .help("solve LP relaxation (if MIP)");
     program.add_argument("--highs-presolve").default_value(false).implicit_value(true)
         .help("use HiGHS presolve instead of built-in presolve");
+    program.add_argument("--use-perturbation").default_value(false).implicit_value(true)
+        .help("use initial perturbation to improve numerical stability");
 
     try {
         program.parse_args(argc, argv);
@@ -153,6 +155,7 @@ int main(int argc, char* argv[]) {
     // Prepare solver settings and solution container
     cuopt::linear_programming::dual_simplex::simplex_solver_settings_t<int, double> settings;
     settings.relaxation = solve_relaxation;
+    settings.use_perturbation = program.get<bool>("--use-perturbation");
 
     cuopt::linear_programming::dual_simplex::lp_solution_t<int, double> solution(
         user_problem.num_rows, user_problem.num_cols);

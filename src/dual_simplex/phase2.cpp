@@ -243,7 +243,7 @@ void initial_perturbation(const lp_problem_t<i_t, f_t>& lp,
   f_t sum_perturb = 0.0;
   i_t num_perturb = 0;
 
-  random_t<i_t, f_t> random(settings.seed);
+  random_t<i_t, f_t> random(settings.random_seed);
   for (i_t j = 0; j < n; ++j) {
     f_t obj = objective[j] = lp.objective[j];
 
@@ -2241,6 +2241,10 @@ dual::status_t dual_phase2(i_t phase,
   assert(q.size() == m);
   reorder_basic_list(q, basic_list);
   basis_update_mpf_t<i_t, f_t> ft(L, U, p, settings.refactor_frequency);
+
+  if (settings.use_perturbation) {
+    cuopt::linear_programming::dual_simplex::phase2::initial_perturbation(lp, settings, vstatus, objective);
+  }
 
   std::vector<f_t> c_basic(m);
   for (i_t k = 0; k < m; ++k) {
