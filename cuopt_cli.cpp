@@ -106,6 +106,8 @@ int main(int argc, char* argv[]) {
         .help("enable profiling");
     program.add_argument("--highs-presolve").default_value(false).implicit_value(true)
         .help("use HiGHS presolve instead of built-in presolve");
+    program.add_argument("--gpu").default_value(false).implicit_value(true)
+        .help("enable GPU acceleration");
 
     try {
         program.parse_args(argc, argv);
@@ -119,6 +121,7 @@ int main(int argc, char* argv[]) {
     const bool profile_enabled = program.get<bool>("--profile");
     const std::string initial_solution_file = program.get<std::string>("--initial-solution");
     const bool use_highs_presolve = program.get<bool>("--highs-presolve");
+    const bool use_gpu = program.get<bool>("--gpu");
 
     cuopt::linear_programming::dual_simplex::user_problem_t<int, double> user_problem;
     if (use_highs_presolve) {
@@ -153,6 +156,7 @@ int main(int argc, char* argv[]) {
     // Prepare solver settings and solution container
     cuopt::linear_programming::dual_simplex::simplex_solver_settings_t<int, double> settings;
     settings.profile = profile_enabled;
+    settings.gpu = use_gpu;
 
     cuopt::linear_programming::dual_simplex::lp_solution_t<int, double> solution(
         user_problem.num_rows, user_problem.num_cols);

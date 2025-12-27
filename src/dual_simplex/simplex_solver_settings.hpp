@@ -65,6 +65,7 @@ struct simplex_solver_settings_t {
       num_threads(std::thread::hardware_concurrency() > 8
                     ? (std::thread::hardware_concurrency() / 8)
                     : std::thread::hardware_concurrency()),
+      gpu(false),
       random_seed(0),
       inside_mip(0),
       solution_callback(nullptr),
@@ -108,6 +109,7 @@ struct simplex_solver_settings_t {
   i_t iteration_log_frequency;     // number of iterations between log updates
   i_t first_iteration_log;         // number of iterations to log at beginning of solve
   i_t num_threads;                 // number of threads to use
+  bool gpu;                        // true to use GPU acceleration
   i_t random_seed;                 // random seed
   i_t inside_mip;  // 0 if outside MIP, 1 if inside MIP at root node, 2 if inside MIP at leaf node
   std::function<void(std::vector<f_t>&, f_t)> solution_callback;

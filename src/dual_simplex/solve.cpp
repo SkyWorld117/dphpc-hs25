@@ -31,6 +31,8 @@
 #include <dual_simplex/types.hpp>
 #include <dual_simplex/user_problem.hpp>
 
+#include <dual_simplex/phase2_dual.hpp>
+
 #include <cstdio>
 #include <cstdlib>
 #include <queue>
@@ -193,7 +195,12 @@ lp_status_t solve_linear_program_advanced(const lp_problem_t<i_t, f_t>& original
                   edge_norms);
       vstatus = phase1_vstatus;
       edge_norms.clear();
-      status = dual_phase2(2, 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+      
+      if (settings.gpu) {
+        status = dual_phase2_cu(2, 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+      } else {
+        status = dual_phase2(2, 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+      }
     }
     constexpr bool primal_cleanup = false;
     if (status == dual::status_t::OPTIMAL && primal_cleanup) {
