@@ -5,6 +5,7 @@
 
 #include <mps_parser/parser.hpp>
 #include <math_optimization/solution_reader.hpp>
+#include <utilities/high_res_timer.hpp>
 
 #include <dual_simplex/user_problem.hpp>
 #include <dual_simplex/solve.hpp>
@@ -18,7 +19,6 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <chrono>
 
 #include <cmath>
 
@@ -157,12 +157,12 @@ int main(int argc, char* argv[]) {
         user_problem.num_rows, user_problem.num_cols);
 
     // Run solver and time it
-    auto t0 = std::chrono::high_resolution_clock::now();
+    HighResTimer timer;
+    timer.start("Dual Simplex Solve");
     auto status = cuopt::linear_programming::dual_simplex::solve_linear_program(user_problem, settings, solution);
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double seconds = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() / 1000.0;
+    timer.stop();
+    timer.display(std::cout, "Dual Simplex Solve");
 
-    std::cout << "Dual Simplex finished in " << seconds << "s\n";
     std::cout << "Status: ";
     switch (status) {
         case cuopt::linear_programming::dual_simplex::lp_status_t::OPTIMAL:
