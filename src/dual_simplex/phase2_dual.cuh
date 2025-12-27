@@ -20,6 +20,9 @@
 #include <limits>
 #include <list>
 
+#include <cuda_runtime.h>
+#include <cusparse.h>
+
 namespace cuopt::linear_programming::dual_simplex {
 
 namespace phase2 {
@@ -2084,6 +2087,82 @@ void prepare_optimality(const lp_problem_t<i_t, f_t>& lp,
     }
   }
 }
+
+template <typename i_t, typename f_t>
+class phase2_timers_t {
+ public:
+  phase2_timers_t(bool should_time)
+    : record_time(should_time),
+      start_time(0),
+      bfrt_time(0),
+      pricing_time(0),
+      btran_time(0),
+      ftran_time(0),
+      flip_time(0),
+      delta_z_time(0),
+      se_norms_time(0),
+      se_entering_time(0),
+      lu_update_time(0),
+      perturb_time(0),
+      vector_time(0),
+      objective_time(0),
+      update_infeasibility_time(0)
+  {
+  }
+
+  void start_timer()
+  {
+    if (!record_time) { return; }
+    start_time = tic();
+  }
+
+  f_t stop_timer()
+  {
+    if (!record_time) { return 0.0; }
+    return toc(start_time);
+  }
+
+  void print_timers(const simplex_solver_settings_t<i_t, f_t>& settings) const
+  {
+    if (!record_time) { return; }
+    const f_t total_time = bfrt_time + pricing_time + btran_time + ftran_time + flip_time +
+                           delta_z_time + lu_update_time + se_norms_time + se_entering_time +
+                           perturb_time + vector_time + objective_time + update_infeasibility_time;
+    // clang-format off
+    settings.log.printf("BFRT time       %.2fs %4.1f%\n", bfrt_time, 100.0 * bfrt_time / total_time);
+    settings.log.printf("Pricing time    %.2fs %4.1f%\n", pricing_time, 100.0 * pricing_time / total_time);
+    settings.log.printf("BTran time      %.2fs %4.1f%\n", btran_time, 100.0 * btran_time / total_time);
+    settings.log.printf("FTran time      %.2fs %4.1f%\n", ftran_time, 100.0 * ftran_time / total_time);
+    settings.log.printf("Flip time       %.2fs %4.1f%\n", flip_time, 100.0 * flip_time / total_time);
+    settings.log.printf("Delta_z time    %.2fs %4.1f%\n", delta_z_time, 100.0 * delta_z_time / total_time);
+    settings.log.printf("LU update time  %.2fs %4.1f%\n", lu_update_time, 100.0 * lu_update_time / total_time);
+    settings.log.printf("SE norms time   %.2fs %4.1f%\n", se_norms_time, 100.0 * se_norms_time / total_time);
+    settings.log.printf("SE enter time   %.2fs %4.1f%\n", se_entering_time, 100.0 * se_entering_time / total_time);
+    settings.log.printf("Perturb time    %.2fs %4.1f%\n", perturb_time, 100.0 * perturb_time / total_time);
+    settings.log.printf("Vector time     %.2fs %4.1f%\n", vector_time, 100.0 * vector_time / total_time);
+    settings.log.printf("Objective time  %.2fs %4.1f%\n", objective_time, 100.0 * objective_time / total_time);
+    settings.log.printf("Inf update time %.2fs %4.1f%\n", update_infeasibility_time, 100.0 * update_infeasibility_time / total_time);
+    settings.log.printf("Sum             %.2fs\n", total_time);
+    // clang-format on
+  }
+  f_t bfrt_time;
+  f_t pricing_time;
+  f_t btran_time;
+  f_t ftran_time;
+  f_t flip_time;
+  f_t delta_z_time;
+  f_t se_norms_time;
+  f_t se_entering_time;
+  f_t lu_update_time;
+  f_t perturb_time;
+  f_t vector_time;
+  f_t objective_time;
+  f_t update_infeasibility_time;
+
+ private:
+  f_t start_time;
+  bool record_time;
+};
 
 } // namespace phase2
 

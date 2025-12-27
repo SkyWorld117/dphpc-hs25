@@ -31,7 +31,7 @@
 #include <dual_simplex/types.hpp>
 #include <dual_simplex/user_problem.hpp>
 
-#include <dual_simplex/phase2_dual.hpp>
+#include <dual_simplex/phase2_dual.cuh>
 
 #include <cstdio>
 #include <cstdlib>
