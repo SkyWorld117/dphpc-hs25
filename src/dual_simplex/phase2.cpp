@@ -2366,7 +2366,7 @@ dual::status_t dual_phase2(i_t phase,
 
   i_t sparse_delta_z = 0;
   i_t dense_delta_z  = 0;
-  phase2::phase2_timers_t<i_t, f_t> timers(settings.profile);
+  phase2::phase2_timers_t<i_t, f_t> timers(settings.profile && phase == 2);
 
   while (iter < iter_limit) {
     // Pricing
