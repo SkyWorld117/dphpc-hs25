@@ -27,6 +27,9 @@ include(rapids-find)
 
 rapids_cuda_init_architectures(CUOPT)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/thirdparty")
+
 project(
   CUOPT
   VERSION 25.08.00
@@ -173,6 +176,8 @@ include(${rapids-cmake-dir}/cpm/rapids_logger.cmake)
 rapids_cpm_rapids_logger(BUILD_EXPORT_SET cuopt-exports INSTALL_EXPORT_SET cuopt-exports)
 create_logger_macros(CUOPT "cuopt::default_logger()" include/cuopt)
 
+find_package(CUDSS REQUIRED)
+
 set(CUOPT_SRC_FILES)
 add_subdirectory(src)
 add_library(cuopt SHARED
@@ -215,11 +220,13 @@ target_include_directories(cuopt
   PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty"
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  "${CUDSS_INCLUDE}"
   PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>"
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libmps_parser/include>"
   "$<INSTALL_INTERFACE:include>"
+  "${CUDSS_INCLUDE}"
 )
 
 # ##################################################################################################
@@ -228,6 +235,7 @@ target_include_directories(cuopt
 set(CUOPT_PRIVATE_CUDA_LIBS
   CUDA::curand
   CUDA::cusolver
+  CUDA::cuda_driver
   OpenMP::OpenMP_CXX)
 
 list(PREPEND CUOPT_PRIVATE_CUDA_LIBS CUDA::cublasLt)
@@ -256,6 +264,7 @@ target_link_libraries(cuopt
   raft::raft
   cuopt::mps_parser
   highs::highs
+  ${CUDSS_LIB_FILE}
   PRIVATE
   ${CUOPT_PRIVATE_CUDA_LIBS}
   )

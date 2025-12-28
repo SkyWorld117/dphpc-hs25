@@ -20,9 +20,6 @@
 #include <limits>
 #include <list>
 
-#include <cuda_runtime.h>
-#include <cusparse.h>
-
 namespace cuopt::linear_programming::dual_simplex {
 
 namespace phase2 {

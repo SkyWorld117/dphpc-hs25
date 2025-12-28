@@ -177,8 +177,14 @@ lp_status_t solve_linear_program_advanced(const lp_problem_t<i_t, f_t>& original
     assert(solution.x.size() == lp.num_cols);
     vstatus = phase1_vstatus;
     edge_norms.clear();
-    dual::status_t status = dual_phase2(
-      2, iter == 0 ? 1 : 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+    dual::status_t status;
+    if (settings.gpu) {
+      status = dual_phase2_cu(
+        2, iter == 0 ? 1 : 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+    } else {
+      status = dual_phase2(
+        2, iter == 0 ? 1 : 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+    }
     if (status == dual::status_t::NUMERICAL) {
       // Became dual infeasible. Try phase 1 again
       phase1_vstatus = vstatus;
