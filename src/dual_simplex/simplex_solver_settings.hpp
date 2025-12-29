@@ -56,7 +56,7 @@ struct simplex_solver_settings_t {
       scale_columns(true),
       relaxation(false),
       use_left_looking_lu(false),
-      eliminate_singletons(true),
+      eliminate_singletons(false),
       print_presolve_stats(true),
       refactor_frequency(100),
       profile(false),
