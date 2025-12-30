@@ -5,39 +5,6 @@
 #include <cudss.h>
 #include <cublas_v2.h>
 
-#define CUDA_CALL_AND_CHECK(call, msg) \
-    do { \
-        cudaError_t cuda_error = call; \
-        if (cuda_error != cudaSuccess) { \
-            printf("CUDA API returned error = %d, details: " #msg "\n", cuda_error); \
-        } \
-    } while(0);
-
-
-#define CUDSS_CALL_AND_CHECK(call, status, msg) \
-    do { \
-        status = call; \
-        if (status != CUDSS_STATUS_SUCCESS) { \
-            printf("CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
-        } \
-    } while(0);
-
-#define CUSPARSE_CALL_AND_CHECK(call, msg) \
-    do { \
-        cusparseStatus_t cusparse_status = call; \
-        if (cusparse_status != CUSPARSE_STATUS_SUCCESS) { \
-            printf("CUSPARSE call ended unsuccessfully with status = %d, details: " #msg "\n", cusparse_status); \
-        } \
-    } while(0);
-
-#define CUBLAS_CALL_AND_CHECK(call, msg) \
-    do { \
-        cublasStatus_t cublas_status = call; \
-        if (cublas_status != CUBLAS_STATUS_SUCCESS) { \
-            printf("CUBLAS call ended unsuccessfully with status = %d, details: " #msg "\n", cublas_status); \
-        } \
-    } while(0);
-
 namespace cuopt::linear_programming::dual_simplex {
 
 namespace phase2_cu {
@@ -488,45 +455,17 @@ dual::status_t dual_phase2_cu(
     assert(nonbasic_list.size() == n - m);
 
     // Compute L*U = A(p, basic_list)
-    csc_matrix_t<i_t, f_t> L(m, m, 1);
-    csc_matrix_t<i_t, f_t> U(m, m, 1);
-    std::vector<i_t> pinv(m);
-    std::vector<i_t> p;
-    std::vector<i_t> q;
-    std::vector<i_t> deficient;
-    std::vector<i_t> slacks_needed;
-
-    if (factorize_basis(lp.A, settings, basic_list, L, U, p, pinv, q, deficient, slacks_needed) ==
-        -1) {
-        settings.log.debug("Initial factorization failed\n");
-        basis_repair(lp.A, settings, deficient, slacks_needed, basic_list, nonbasic_list, vstatus);
-        if (factorize_basis(lp.A, settings, basic_list, L, U, p, pinv, q, deficient, slacks_needed) ==
-            -1) {
-        return dual::status_t::NUMERICAL;
-        }
-        settings.log.printf("Basis repaired\n");
-    }
-
-    f_t* d_D_pinv;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_D_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
+    f_t* d_B_pinv;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
     phase2_cu::compute_inverse<i_t, f_t>(
         m,
         n,
         lp.A,
         basic_list,
-        d_D_pinv
+        d_B_pinv
     );
 
     if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
-    assert(q.size() == m);
-    std::vector<f_t> c_basic_noshuffle(m);
-    for (i_t k = 0; k < m; ++k) {
-        const i_t j = basic_list[k];
-        c_basic_noshuffle[k] = objective[j];
-    }
-    reorder_basic_list(q, basic_list);
-    basis_update_mpf_t<i_t, f_t> ft(L, U, p, settings.refactor_frequency);
-
     std::vector<f_t> c_basic(m);
     for (i_t k = 0; k < m; ++k) {
         const i_t j = basic_list[k];
@@ -537,7 +476,7 @@ dual::status_t dual_phase2_cu(
     f_t* d_c_basic, *d_y;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_c_basic, m * sizeof(f_t)), "cudaMalloc d_c_basic");
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_y, m * sizeof(f_t)), "cudaMalloc d_y");
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_c_basic, c_basic_noshuffle.data(), m * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_c_basic");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(d_c_basic, c_basic.data(), m * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_c_basic");
 
     const f_t alpha = 1.0;
     const f_t beta  = 0.0;
@@ -549,7 +488,7 @@ dual::status_t dual_phase2_cu(
         m,
         m,
         &alpha,
-        d_D_pinv,
+        d_B_pinv,
         m,
         d_c_basic,
         1,
@@ -565,21 +504,6 @@ dual::status_t dual_phase2_cu(
     CUDA_CALL_AND_CHECK(cudaFree(d_y), "cudaFree d_y");
 
     if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
-
-    // DEBUG: Compare with the CPU solution
-    std::vector<f_t> y_ref(m);
-    // Shuffle y according to q
-    std::vector<f_t> y_shuffled(m);
-    for (i_t k = 0; k < m; ++k) {
-        y_shuffled[k] = y[q[k]];
-    }
-
-    ft.b_transpose_solve(c_basic, y_ref);
-    for (i_t i = 0; i < m; ++i) {
-        if (std::abs(y[i] - y_ref[i]) > 1e-6) {
-        settings.log.printf("y mismatch at %d: %e vs %e\n", i, y[i], y_ref[i]);
-        }
-    }
 
     phase2::compute_reduced_costs(objective, lp.A, y, basic_list, nonbasic_list, z);
 
@@ -598,7 +522,7 @@ dual::status_t dual_phase2_cu(
     }
 
     phase2::compute_primal_variables(
-        ft, lp.rhs, lp.A, basic_list, nonbasic_list, settings.tight_tol, x);
+        cublas_handle, d_B_pinv, lp.rhs, lp.A, basic_list, nonbasic_list, settings.tight_tol, x);
 
     if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
 
@@ -608,11 +532,11 @@ dual::status_t dual_phase2_cu(
         phase2::initialize_steepest_edge_norms_from_slack_basis(
             basic_list, nonbasic_list, delta_y_steepest_edge);
         } else {
-        std::fill(delta_y_steepest_edge.begin(), delta_y_steepest_edge.end(), -1);
-        if (phase2::initialize_steepest_edge_norms(
-                lp, settings, start_time, basic_list, ft, delta_y_steepest_edge) == -1) {
-            return dual::status_t::TIME_LIMIT;
-        }
+            std::fill(delta_y_steepest_edge.begin(), delta_y_steepest_edge.end(), -1);
+            if (phase2::initialize_steepest_edge_norms(
+                    lp, settings, start_time, basic_list, cublas_handle, d_B_pinv, delta_y_steepest_edge) == -1) {
+                return dual::status_t::TIME_LIMIT;
+            }
         }
     } else {
         settings.log.printf("using exisiting steepest edge %e\n",
@@ -686,7 +610,8 @@ dual::status_t dual_phase2_cu(
         if (leaving_index == -1) {
         phase2::prepare_optimality(lp,
                                     settings,
-                                    ft,
+                                    cublas_handle,
+                                    d_B_pinv,
                                     objective,
                                     basic_list,
                                     nonbasic_list,
@@ -707,8 +632,7 @@ dual::status_t dual_phase2_cu(
         // BT*delta_y = -delta_zB = -sigma*ei
         timers.start_timer();
         sparse_vector_t<i_t, f_t> delta_y_sparse(m, 0);
-        sparse_vector_t<i_t, f_t> UTsol_sparse(m, 0);
-        phase2::compute_delta_y(ft, basic_leaving_index, direction, delta_y_sparse, UTsol_sparse);
+        phase2::compute_delta_y(cublas_handle, d_B_pinv, basic_leaving_index, direction, delta_y_sparse);
         timers.btran_time += timers.stop_timer();
 
         const f_t steepest_edge_norm_check = delta_y_sparse.norm2_squared();
@@ -760,16 +684,6 @@ dual::status_t dual_phase2_cu(
                                             delta_z);
         }
         timers.delta_z_time += timers.stop_timer();
-
-    #ifdef COMPUTE_DUAL_RESIDUAL
-        std::vector<f_t> dual_residual;
-        std::vector<f_t> zeros(n, 0.0);
-        phase2::compute_dual_residual(lp.A, zeros, delta_y, delta_z, dual_residual);
-        // || A'*delta_y + delta_z ||_inf
-        f_t dual_residual_norm = vector_norm_inf<i_t, f_t>(dual_residual);
-        settings.log.printf(
-        "|| A'*dy - dz || %e use transpose %d\n", dual_residual_norm, use_transpose);
-    #endif
 
         // Ratio test
         f_t step_length;
@@ -823,7 +737,7 @@ dual::status_t dual_phase2_cu(
             std::vector<f_t> unperturbed_y(m);
             std::vector<f_t> unperturbed_z(n);
             phase2::compute_dual_solution_from_basis(
-            lp, ft, basic_list, nonbasic_list, unperturbed_y, unperturbed_z);
+            lp, cublas_handle, d_B_pinv, basic_list, nonbasic_list, unperturbed_y, unperturbed_z);
             {
             const f_t dual_infeas = phase2::dual_infeasibility(
                 lp, settings, vstatus, unperturbed_z, settings.tight_tol, settings.dual_tol);
@@ -836,7 +750,7 @@ dual::status_t dual_phase2_cu(
 
                 std::vector<f_t> unperturbed_x(n);
                 phase2::compute_primal_solution_from_basis(
-                lp, ft, basic_list, nonbasic_list, vstatus, unperturbed_x);
+                lp, cublas_handle, d_B_pinv, basic_list, nonbasic_list, vstatus, unperturbed_x);
                 x                    = unperturbed_x;
                 primal_infeasibility = phase2::compute_initial_primal_infeasibilities(
                 lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
@@ -848,7 +762,8 @@ dual::status_t dual_phase2_cu(
                 if (dual_infeas <= settings.dual_tol && primal_infeasibility <= settings.primal_tol) {
                 phase2::prepare_optimality(lp,
                                             settings,
-                                            ft,
+                                            cublas_handle,
+                                            d_B_pinv,
                                             objective,
                                             basic_list,
                                             nonbasic_list,
@@ -873,7 +788,7 @@ dual::status_t dual_phase2_cu(
             } else {
                 std::vector<f_t> unperturbed_x(n);
                 phase2::compute_primal_solution_from_basis(
-                lp, ft, basic_list, nonbasic_list, vstatus, unperturbed_x);
+                lp, cublas_handle, d_B_pinv, basic_list, nonbasic_list, vstatus, unperturbed_x);
                 x                    = unperturbed_x;
                 primal_infeasibility = phase2::compute_initial_primal_infeasibilities(
                 lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
@@ -885,7 +800,8 @@ dual::status_t dual_phase2_cu(
                     orig_dual_infeas <= settings.dual_tol) {
                 phase2::prepare_optimality(lp,
                                             settings,
-                                            ft,
+                                            cublas_handle,
+                                            d_B_pinv,
                                             objective,
                                             basic_list,
                                             nonbasic_list,
@@ -941,7 +857,6 @@ dual::status_t dual_phase2_cu(
         settings.log.printf("Dual infeasibility %e\n", dual_infeas);
         const f_t primal_inf = phase2::primal_infeasibility(lp, settings, vstatus, x);
         settings.log.printf("Primal infeasibility %e\n", primal_inf);
-        settings.log.printf("Updates %d\n", ft.num_updates());
         settings.log.printf("Steepest edge %e\n", max_val);
         if (dual_infeas > settings.dual_tol) {
             settings.log.printf(
@@ -958,14 +873,6 @@ dual::status_t dual_phase2_cu(
         phase2::update_dual_variables(
         delta_y_sparse, delta_z_indices, delta_z, step_length, leaving_index, y, z);
         timers.vector_time += timers.stop_timer();
-
-    #ifdef COMPUTE_DUAL_RESIDUAL
-        phase2::compute_dual_residual(lp.A, objective, y, z, dual_res1);
-        f_t dual_res_norm = vector_norm_inf<i_t, f_t>(dual_res1);
-        if (dual_res_norm > settings.dual_tol) {
-        settings.log.printf("|| A'*y + z - c || %e steplength %e\n", dual_res_norm, step_length);
-        }
-    #endif
 
         timers.start_timer();
         // Update primal variable
@@ -988,7 +895,8 @@ dual::status_t dual_phase2_cu(
         sparse_vector_t<i_t, f_t> delta_xB_0_sparse(m, 0);
         if (num_flipped > 0) {
         timers.start_timer();
-        phase2::adjust_for_flips(ft,
+        phase2::adjust_for_flips(cublas_handle,
+                                d_B_pinv,
                                 basic_list,
                                 delta_z_indices,
                                 atilde_index,
@@ -1001,11 +909,11 @@ dual::status_t dual_phase2_cu(
         }
 
         timers.start_timer();
-        sparse_vector_t<i_t, f_t> utilde_sparse(m, 0);
         sparse_vector_t<i_t, f_t> scaled_delta_xB_sparse(m, 0);
         sparse_vector_t<i_t, f_t> rhs_sparse(lp.A, entering_index);
         if (phase2::compute_delta_x(lp,
-                                    ft,
+                                    cublas_handle,
+                                    d_B_pinv,
                                     entering_index,
                                     leaving_index,
                                     basic_leaving_index,
@@ -1014,7 +922,6 @@ dual::status_t dual_phase2_cu(
                                     delta_x_flip,
                                     rhs_sparse,
                                     x,
-                                    utilde_sparse,
                                     scaled_delta_xB_sparse,
                                     delta_x) == -1) {
         settings.log.printf("Failed to compute delta_x. Iter %d\n", iter);
@@ -1023,17 +930,11 @@ dual::status_t dual_phase2_cu(
 
         timers.ftran_time += timers.stop_timer();
 
-    #ifdef CHECK_PRIMAL_STEP
-        std::vector<f_t> residual(m);
-        matrix_vector_multiply(lp.A, 1.0, delta_x, 1.0, residual);
-        f_t primal_step_err = vector_norm_inf<i_t, f_t>(residual);
-        if (primal_step_err > 1e-4) { settings.log.printf("|| A * dx || %e\n", primal_step_err); }
-    #endif
-
         timers.start_timer();
         const i_t steepest_edge_status = phase2::update_steepest_edge_norms(settings,
                                                                             basic_list,
-                                                                            ft,
+                                                                            cublas_handle,
+                                                                            d_B_pinv,
                                                                             direction,
                                                                             delta_y_sparse,
                                                                             steepest_edge_norm_check,
@@ -1042,12 +943,6 @@ dual::status_t dual_phase2_cu(
                                                                             entering_index,
                                                                             v,
                                                                             delta_y_steepest_edge);
-    #ifdef STEEPEST_EDGE_DEBUG
-        if (steepest_edge_status == -1) {
-        settings.log.printf("Num updates %d\n", ft.num_updates());
-        settings.log.printf("|| rhs || %e\n", vector_norm_inf(rhs));
-        }
-    #endif
         assert(steepest_edge_status == 0);
         timers.se_norms_time += timers.stop_timer();
 
@@ -1055,15 +950,6 @@ dual::status_t dual_phase2_cu(
         // x <- x + delta_x
         phase2::update_primal_variables(scaled_delta_xB_sparse, basic_list, delta_x, entering_index, x);
         timers.vector_time += timers.stop_timer();
-
-    #ifdef COMPUTE_PRIMAL_RESIDUAL
-        residual = lp.rhs;
-        matrix_vector_multiply(lp.A, 1.0, x, -1.0, residual);
-        primal_residual = vector_norm_inf<i_t, f_t>(residual);
-        if (iter % 100 == 0 && primal_residual > 10 * settings.primal_tol) {
-        settings.log.printf("|| A*x - b || %e\n", primal_residual);
-        }
-    #endif
 
         timers.start_timer();
         // TODO(CMM): Do I also need to update the objective due to the bound flips?
@@ -1075,9 +961,6 @@ dual::status_t dual_phase2_cu(
         timers.start_timer();
         // Update primal infeasibilities due to changes in basic variables
         // from flipping bounds
-    #ifdef CHECK_BASIC_INFEASIBILITIES
-        phase2::check_basic_infeasibilities(basic_list, basic_mark, infeasibility_indices, 2);
-    #endif
         phase2::update_primal_infeasibilities(lp,
                                             settings,
                                             basic_list,
@@ -1112,10 +995,6 @@ dual::status_t dual_phase2_cu(
 
         phase2::clean_up_infeasibilities(squared_infeasibilities, infeasibility_indices);
 
-    #if CHECK_PRIMAL_INFEASIBILITIES
-        phase2::check_primal_infeasibilities(
-        lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
-    #endif
         timers.update_infeasibility_time += timers.stop_timer();
 
         // Clear delta_x
@@ -1129,9 +1008,9 @@ dual::status_t dual_phase2_cu(
         // Update basis information
         vstatus[entering_index] = variable_status_t::BASIC;
         if (lp.lower[leaving_index] != lp.upper[leaving_index]) {
-        vstatus[leaving_index] = static_cast<variable_status_t>(-direction);
+            vstatus[leaving_index] = static_cast<variable_status_t>(-direction);
         } else {
-        vstatus[leaving_index] = variable_status_t::NONBASIC_FIXED;
+            vstatus[leaving_index] = variable_status_t::NONBASIC_FIXED;
         }
         basic_list[basic_leaving_index]        = entering_index;
         nonbasic_list[nonbasic_entering_index] = leaving_index;
@@ -1140,98 +1019,35 @@ dual::status_t dual_phase2_cu(
         basic_mark[leaving_index]              = -1;
         basic_mark[entering_index]             = basic_leaving_index;
 
-    #ifdef CHECK_BASIC_INFEASIBILITIES
-        phase2::check_basic_infeasibilities(basic_list, basic_mark, infeasibility_indices, 5);
-    #endif
-
         timers.start_timer();
         // Refactor or update the basis factorization
-        bool should_refactor = ft.num_updates() > settings.refactor_frequency;
+        bool should_refactor = true;
         if (!should_refactor) {
-        i_t recommend_refactor = ft.update(utilde_sparse, UTsol_sparse, basic_leaving_index);
-    #ifdef CHECK_UPDATE
-        phase2::check_update(lp, settings, ft, basic_list, basic_leaving_index);
-    #endif
-        should_refactor = recommend_refactor == 1;
+            // i_t recommend_refactor = ft.update(utilde_sparse, UTsol_sparse, basic_leaving_index);
+            // should_refactor = recommend_refactor == 1;
+            // TODO: eta updates
         }
 
-    #ifdef CHECK_BASIC_INFEASIBILITIES
-        phase2::check_basic_infeasibilities(basic_list, basic_mark, infeasibility_indices, 6);
-    #endif
         if (should_refactor) {
-        bool should_recompute_x = false;
-        if (factorize_basis(lp.A, settings, basic_list, L, U, p, pinv, q, deficient, slacks_needed) ==
-            -1) {
-            should_recompute_x = true;
-            settings.log.printf("Failed to factorize basis. Iteration %d\n", iter);
-            if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
-            basis_repair(lp.A, settings, deficient, slacks_needed, basic_list, nonbasic_list, vstatus);
-            i_t count = 0;
-            while (factorize_basis(
-                    lp.A, settings, basic_list, L, U, p, pinv, q, deficient, slacks_needed) == -1) {
-            settings.log.printf("Failed to repair basis. Iteration %d. %d deficient columns.\n",
-                                iter,
-                                static_cast<int>(deficient.size()));
-            if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
-            settings.threshold_partial_pivoting_tol = 1.0;
-            count++;
-            if (count > 10) { return dual::status_t::NUMERICAL; }
-            basis_repair(
-                lp.A, settings, deficient, slacks_needed, basic_list, nonbasic_list, vstatus);
+            // Recompute d_B_pinv
+            phase2_cu::compute_inverse<i_t, f_t>(
+                m,
+                n,
+                lp.A,
+                basic_list,
+                d_B_pinv
+            );
 
-    #ifdef CHECK_BASIS_REPAIR
-            csc_matrix_t<i_t, f_t> B(m, m, 0);
-            form_b(lp.A, basic_list, B);
-            for (i_t k = 0; k < deficient.size(); ++k) {
-                const i_t j         = deficient[k];
-                const i_t col_start = B.col_start[j];
-                const i_t col_end   = B.col_start[j + 1];
-                const i_t col_nz    = col_end - col_start;
-                if (col_nz != 1) {
-                settings.log.printf("Deficient column %d has %d nonzeros\n", j, col_nz);
-                }
-                const i_t i = B.i[col_start];
-                if (i != slacks_needed[k]) {
-                settings.log.printf("Slack %d needed but found %d instead\n", slacks_needed[k], i);
-                }
-            }
-    #endif
-            }
-
-            settings.log.printf("Successfully repaired basis. Iteration %d\n", iter);
+            phase2::reset_basis_mark(basic_list, nonbasic_list, basic_mark, nonbasic_mark);
+            phase2::compute_initial_primal_infeasibilities(
+                lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
         }
-        reorder_basic_list(q, basic_list);
-        ft.reset(L, U, p);
-        phase2::reset_basis_mark(basic_list, nonbasic_list, basic_mark, nonbasic_mark);
-        if (should_recompute_x) {
-            std::vector<f_t> unperturbed_x(n);
-            phase2::compute_primal_solution_from_basis(
-            lp, ft, basic_list, nonbasic_list, vstatus, unperturbed_x);
-            x = unperturbed_x;
-        }
-        phase2::compute_initial_primal_infeasibilities(
-            lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
-        }
-    #ifdef CHECK_BASIC_INFEASIBILITIES
-        phase2::check_basic_infeasibilities(basic_list, basic_mark, infeasibility_indices, 7);
-    #endif
         timers.lu_update_time += timers.stop_timer();
 
         timers.start_timer();
         phase2::compute_steepest_edge_norm_entering(
-        settings, m, ft, basic_leaving_index, entering_index, delta_y_steepest_edge);
+            settings, m, cublas_handle, d_B_pinv, basic_leaving_index, entering_index, delta_y_steepest_edge);
         timers.se_entering_time += timers.stop_timer();
-
-    #ifdef STEEPEST_EDGE_DEBUG
-        if (iter < 100 || iter % 100 == 0))
-        {
-        phase2::check_steepest_edge_norms(settings, basic_list, ft, delta_y_steepest_edge);
-        }
-    #endif
-
-    #ifdef CHECK_BASIS_MARK
-        phase2::check_basis_mark(settings, basic_list, nonbasic_list, basic_mark, nonbasic_mark);
-    #endif
 
         iter++;
 
@@ -1254,15 +1070,15 @@ dual::status_t dual_phase2_cu(
         }
 
         if (obj >= settings.cut_off) {
-        settings.log.printf("Solve cutoff. Current objecive %e. Cutoff %e\n", obj, settings.cut_off);
-        return dual::status_t::CUTOFF;
+            settings.log.printf("Solve cutoff. Current objective %e. Cutoff %e\n", obj, settings.cut_off);
+            return dual::status_t::CUTOFF;
         }
 
         if (now > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
 
         if (settings.concurrent_halt != nullptr &&
             settings.concurrent_halt->load(std::memory_order_acquire) == 1) {
-        return dual::status_t::CONCURRENT_LIMIT;
+            return dual::status_t::CONCURRENT_LIMIT;
         }
     }
     if (iter >= iter_limit) { status = dual::status_t::ITERATION_LIMIT; }
@@ -1271,18 +1087,17 @@ dual::status_t dual_phase2_cu(
         timers.print_timers(settings);
         constexpr bool print_stats = false;
         if constexpr (print_stats) {
-        settings.log.printf("Sparse delta_z %8d %8.2f%\n",
-                            sparse_delta_z,
-                            100.0 * sparse_delta_z / (sparse_delta_z + dense_delta_z));
-        settings.log.printf("Dense delta_z  %8d %8.2f%\n",
-                            dense_delta_z,
-                            100.0 * dense_delta_z / (sparse_delta_z + dense_delta_z));
-        ft.print_stats();
+            settings.log.printf("Sparse delta_z %8d %8.2f%\n",
+                                sparse_delta_z,
+                                100.0 * sparse_delta_z / (sparse_delta_z + dense_delta_z));
+            settings.log.printf("Dense delta_z  %8d %8.2f%\n",
+                                dense_delta_z,
+                                100.0 * dense_delta_z / (sparse_delta_z + dense_delta_z));
         }
     }
 
     // Cleanup GPU resources
-    CUDA_CALL_AND_CHECK(cudaFree(d_D_pinv), "cudaFree d_D_pinv");
+    CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv), "cudaFree d_D_pinv");
     CUBLAS_CALL_AND_CHECK(cublasDestroy(cublas_handle), "cublasDestroy");
 
     return status;
