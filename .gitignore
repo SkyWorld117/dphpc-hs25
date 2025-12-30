@@ -208,3 +208,6 @@ __marimo__/
 
 # VSCode Settings
 .vscode/
+
+# Clangd
+.clangd
