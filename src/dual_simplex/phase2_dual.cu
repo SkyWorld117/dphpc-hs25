@@ -215,7 +215,7 @@ i_t compute_inverse(
         CUSPARSE_INDEX_BASE_ZERO,
         CUDA_R_64F
     ), "cusparseCreateCsr for B_T B");
-    
+
     void* d_buffer1 = nullptr;
     void* d_buffer2 = nullptr;
     size_t buffer_size1 = 0;
@@ -224,7 +224,7 @@ i_t compute_inverse(
     f_t beta = 0.0;
     cusparseSpGEMMDescr_t spgemm_desc;
     CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_createDescr(&spgemm_desc), "cusparseSpGEMM_createDescr");
-    
+
     CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_workEstimation(
         cusparse_handle,
         CUSPARSE_OPERATION_NON_TRANSPOSE,
@@ -545,7 +545,7 @@ dual::status_t dual_phase2_cu(
     CUBLAS_CALL_AND_CHECK(cublasCreate(&cublas_handle), "cublasCreate");
     CUBLAS_CALL_AND_CHECK(cublasDgemv(
         cublas_handle,
-        CUBLAS_OP_N,
+        CUBLAS_OP_T,
         m,
         m,
         &alpha,
@@ -559,13 +559,11 @@ dual::status_t dual_phase2_cu(
     ), "cublasDgemv to compute y = D_pinv * c_basic");
 
     CUDA_CALL_AND_CHECK(cudaMemcpy(y.data(), d_y, m * sizeof(f_t), cudaMemcpyDeviceToHost), "cudaMemcpy y");
-    
+
     // Cleanup GPU resources
-    CUBLAS_CALL_AND_CHECK(cublasDestroy(cublas_handle), "cublasDestroy");
     CUDA_CALL_AND_CHECK(cudaFree(d_c_basic), "cudaFree d_c_basic");
     CUDA_CALL_AND_CHECK(cudaFree(d_y), "cudaFree d_y");
-    CUDA_CALL_AND_CHECK(cudaFree(d_D_pinv), "cudaFree d_D_pinv");
-    
+
     if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
 
     // DEBUG: Compare with the CPU solution
@@ -1282,6 +1280,10 @@ dual::status_t dual_phase2_cu(
         ft.print_stats();
         }
     }
+
+    // Cleanup GPU resources
+    CUDA_CALL_AND_CHECK(cudaFree(d_D_pinv), "cudaFree d_D_pinv");
+    CUBLAS_CALL_AND_CHECK(cublasDestroy(cublas_handle), "cublasDestroy");
 
     return status;
 }
