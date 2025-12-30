@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <cusparse.h>
 #include <cudss.h>
+#include <cublas_v2.h>
 
 #define CUDA_CALL_AND_CHECK(call, msg) \
     do { \
@@ -21,36 +22,35 @@
         } \
     } while(0);
 
+#define CUSPARSE_CALL_AND_CHECK(call, msg) \
+    do { \
+        cusparseStatus_t cusparse_status = call; \
+        if (cusparse_status != CUSPARSE_STATUS_SUCCESS) { \
+            printf("CUSPARSE call ended unsuccessfully with status = %d, details: " #msg "\n", cusparse_status); \
+        } \
+    } while(0);
+
+#define CUBLAS_CALL_AND_CHECK(call, msg) \
+    do { \
+        cublasStatus_t cublas_status = call; \
+        if (cublas_status != CUBLAS_STATUS_SUCCESS) { \
+            printf("CUBLAS call ended unsuccessfully with status = %d, details: " #msg "\n", cublas_status); \
+        } \
+    } while(0);
+
 namespace cuopt::linear_programming::dual_simplex {
 
 namespace phase2_cu {
 
 template <typename i_t, typename f_t>
-i_t factorize_and_repair(
+i_t compute_inverse(
     i_t m,
     i_t n,
     const csc_matrix_t<i_t, f_t>& A,
     const std::vector<i_t>& basic_list,
-    bool refactorize,
-    std::vector<i_t>& q,
-    cudssHandle_t& dss_handle_b,
-    cudssConfig_t& solverConfig_b,
-    cudssData_t& solverData_b,
-    cudssMatrix_t& d_B_matrix,
-    cudssHandle_t& dss_handle_bt,
-    cudssConfig_t& solverConfig_bt,
-    cudssData_t& solverData_bt,
-    cudssMatrix_t& d_Bt_matrix
+    f_t*& d_X
 ) {
     dual::status_t status = dual::status_t::UNSET;
-
-    // 1. Assemble B = A(:, basic_list) as CSR
-    // 2. Move B to device
-    // 3. Factor B = L*U using cuDSS
-    // 4. If fails, repair the basis only once and try again. If still fails, return NUMERICAL status
-    //    Notice this might happen only if we eliminate singletons which we do not do for now.
-    //    Seems like the cleanup for deficient columns is not necessary without singleton handling.
-    // TODO: Implement singleton handling and basis repair (and potentially cleanup of deficient columns)
 
     // Assemble B in CSR format
     csr_matrix_t<i_t, f_t> B_csr;
@@ -114,6 +114,34 @@ i_t factorize_and_repair(
         }
     }
 
+    // // Verify B^T = B_T
+    // // 1. Convert B to dense
+    // std::vector<std::vector<f_t>> B_dense(m, std::vector<f_t>(m, 0.0));
+    // for (i_t row = 0; row < m; ++row) {
+    //     for (i_t idx = B_csr.row_start[row]; idx < B_csr.row_start[row + 1]; ++idx) {
+    //         i_t col = B_csr.j[idx];
+    //         B_dense[row][col] = B_csr.x[idx];
+    //     }
+    // }
+    // // 2. Convert B_T to dense
+    // std::vector<std::vector<f_t>> B_t_dense(m, std::vector<f_t>(m, 0.0));
+    // for (i_t row = 0; row < m; ++row) {
+    //     for (i_t idx = B_t_csr.row_start[row]; idx < B_t_csr.row_start[row + 1]; ++idx) {
+    //         i_t col = B_t_csr.j[idx];
+    //         B_t_dense[row][col] = B_t_csr.x[idx];
+    //     }
+    // }
+    // // 3. Compare
+    // for (i_t row = 0; row < m; ++row) {
+    //     for (i_t col = 0; col < m; ++col) {
+    //         if (std::abs(B_dense[row][col] - B_t_dense[col][row]) > 1e-8) {
+    //             printf("Error: B^T and B_T do not match at (%d, %d): %f vs %f\n", row, col, B_dense[row][col], B_t_dense[col][row]);
+    //             return -1;
+    //         }
+    //     }
+    // }
+    // printf("Verified: B^T matches B_T\n");
+
     // Move B to device
     i_t* d_B_row_ptr;
     i_t* d_B_col_ind;
@@ -140,94 +168,274 @@ i_t factorize_and_repair(
     CUDA_CALL_AND_CHECK(cudaMemcpy(d_Bt_col_ind, B_t_csr.j.data(), B_t_csr.nz_max * sizeof(i_t), cudaMemcpyHostToDevice), "cudaMemcpy d_Bt_col_ind");
     CUDA_CALL_AND_CHECK(cudaMemcpy(d_Bt_values, B_t_csr.x.data(), B_t_csr.nz_max * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_Bt_values");
 
-    // Factor B = L*U using cuDSS
-    cudssStatus_t dss_status = CUDSS_STATUS_SUCCESS;
-    cudssPhase_t factorization_phase = refactorize ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
-
-    CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(
+    // Compute (B^T B) with cuSPARSE
+    cusparseHandle_t cusparse_handle;
+    // Here we assume (B^T B) is also sparse
+    i_t* d_BtB_row_ptr = nullptr;
+    i_t* d_BtB_col_ind = nullptr;
+    f_t* d_BtB_values = nullptr;
+    cusparseSpMatDescr_t d_B_matrix, d_Bt_matrix, d_BtB_matrix;
+    CUSPARSE_CALL_AND_CHECK(cusparseCreate(&cusparse_handle), "cusparseCreate");
+    CUSPARSE_CALL_AND_CHECK(cusparseCreateCsr(
         &d_B_matrix,
         m,
         m,
         B_csr.nz_max,
         d_B_row_ptr,
-        NULL,
         d_B_col_ind,
         d_B_values,
-        CUDA_R_32I,
-        CUDA_R_64F,
-        CUDSS_MTYPE_GENERAL,
-        CUDSS_MVIEW_FULL,
-        CUDSS_BASE_ZERO
-    ), dss_status, "cudssMatrixCreateCsr for B");
-
-    CUDSS_CALL_AND_CHECK(cudssExecute(
-        dss_handle_b,
-        CUDSS_PHASE_ANALYSIS,
-        solverConfig_b,
-        solverData_b,
-        d_B_matrix,
-        NULL,
-        NULL
-    ), dss_status, "cudssExecute Analysis for B");
-    
-    CUDSS_CALL_AND_CHECK(cudssExecute(
-        dss_handle_b,
-        factorization_phase,
-        solverConfig_b,
-        solverData_b,
-        d_B_matrix,
-        NULL,
-        NULL
-    ), dss_status, "cudssExecute Factorization for B");
-
-    // Factor B_T = U_T * L_T using cuDSS
-    CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(
+        CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO,
+        CUDA_R_64F
+    ), "cusparseCreateCsr for B");
+    CUSPARSE_CALL_AND_CHECK(cusparseCreateCsr(
         &d_Bt_matrix,
         m,
         m,
         B_t_csr.nz_max,
         d_Bt_row_ptr,
-        NULL,
         d_Bt_col_ind,
         d_Bt_values,
+        CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO,
+        CUDA_R_64F
+    ), "cusparseCreateCsr for B_T");
+    CUSPARSE_CALL_AND_CHECK(cusparseCreateCsr(
+        &d_BtB_matrix,
+        m,
+        m,
+        0,  // to be computed
+        nullptr,
+        nullptr,
+        nullptr,
+        CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO,
+        CUDA_R_64F
+    ), "cusparseCreateCsr for B_T B");
+    
+    void* d_buffer1 = nullptr;
+    void* d_buffer2 = nullptr;
+    size_t buffer_size1 = 0;
+    size_t buffer_size2 = 0;
+    f_t alpha = 1.0;
+    f_t beta = 0.0;
+    cusparseSpGEMMDescr_t spgemm_desc;
+    CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_createDescr(&spgemm_desc), "cusparseSpGEMM_createDescr");
+    
+    CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_workEstimation(
+        cusparse_handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha,
+        d_Bt_matrix,
+        d_B_matrix,
+        &beta,
+        d_BtB_matrix,
+        CUDA_R_64F,
+        CUSPARSE_SPGEMM_DEFAULT,
+        spgemm_desc,
+        &buffer_size1,
+        nullptr
+    ), "cusparseSpGEMM_workEstimation for B_T B");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_buffer1, buffer_size1), "cudaMalloc d_buffer1 for B_T B");
+
+    CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_workEstimation(
+        cusparse_handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha,
+        d_Bt_matrix,
+        d_B_matrix,
+        &beta,
+        d_BtB_matrix,
+        CUDA_R_64F,
+        CUSPARSE_SPGEMM_DEFAULT,
+        spgemm_desc,
+        &buffer_size1,
+        d_buffer1
+    ), "cusparseSpGEMM_workEstimation for B_T B");
+
+    CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_compute(
+        cusparse_handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha,
+        d_Bt_matrix,
+        d_B_matrix,
+        &beta,
+        d_BtB_matrix,
+        CUDA_R_64F,
+        CUSPARSE_SPGEMM_DEFAULT,
+        spgemm_desc,
+        &buffer_size2,
+        nullptr
+    ), "cusparseSpGEMM_compute for B_T B");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_buffer2, buffer_size2), "cudaMalloc d_buffer2 for B_T B");
+
+    CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_compute(
+        cusparse_handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha,
+        d_Bt_matrix,
+        d_B_matrix,
+        &beta,
+        d_BtB_matrix,
+        CUDA_R_64F,
+        CUSPARSE_SPGEMM_DEFAULT,
+        spgemm_desc,
+        &buffer_size2,
+        d_buffer2
+    ), "cusparseSpGEMM_compute for B_T B");
+    
+    // Get the size of the result matrix AFTER compute
+    int64_t rows_BtB, cols_BtB, nnz_BtB;
+    CUSPARSE_CALL_AND_CHECK(cusparseSpMatGetSize(d_BtB_matrix, &rows_BtB, &cols_BtB, &nnz_BtB), "cusparseSpMatGetSize for B_T B");
+    assert(rows_BtB == m);
+    assert(cols_BtB == m);
+    
+    // Allocate memory for the result matrix
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_BtB_row_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_BtB_row_ptr");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_BtB_col_ind, nnz_BtB * sizeof(i_t)), "cudaMalloc d_BtB_col_ind");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_BtB_values, nnz_BtB * sizeof(f_t)), "cudaMalloc d_BtB_values");
+    
+    // Update the matrix descriptor with the allocated pointers BEFORE copy
+    CUSPARSE_CALL_AND_CHECK(cusparseCsrSetPointers(d_BtB_matrix, d_BtB_row_ptr, d_BtB_col_ind, d_BtB_values), "cusparseCsrSetPointers for B_T B");
+    
+    // Now copy the result into the allocated memory
+    CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_copy(
+        cusparse_handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha,
+        d_Bt_matrix,
+        d_B_matrix,
+        &beta,
+        d_BtB_matrix,
+        CUDA_R_64F,
+        CUSPARSE_SPGEMM_DEFAULT,
+        spgemm_desc
+    ), "cusparseSpGEMM_copy for B_T B");
+
+    // cuSPARSE cleanup
+    CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_destroyDescr(spgemm_desc), "cusparseSpGEMM_destroyDescr");
+    CUDA_CALL_AND_CHECK(cudaFree(d_buffer1), "cudaFree d_buffer1");
+    CUDA_CALL_AND_CHECK(cudaFree(d_buffer2), "cudaFree d_buffer2");
+    CUSPARSE_CALL_AND_CHECK(cusparseDestroySpMat(d_B_matrix), "cusparseDestroySpMat B");
+    CUSPARSE_CALL_AND_CHECK(cusparseDestroySpMat(d_Bt_matrix), "cusparseDestroySpMat B_T");
+    CUSPARSE_CALL_AND_CHECK(cusparseDestroySpMat(d_BtB_matrix), "cusparseDestroySpMat B_T B");
+    CUSPARSE_CALL_AND_CHECK(cusparseDestroy(cusparse_handle), "cusparseDestroy");
+
+    // Factor (B^T B) = L*U using cuDSS and solve for (B^T B) X = B^T
+    // => X = (B^T B)^(-1) B^T is the pseudo-inverse of B
+    cudssStatus_t dss_status = CUDSS_STATUS_SUCCESS;
+
+    cudssHandle_t dss_handle;
+    CUDSS_CALL_AND_CHECK(cudssCreate(&dss_handle), dss_status, "cudssCreateHandle B");
+
+    cudssConfig_t solverConfig;
+    cudssData_t solverData;
+    CUDSS_CALL_AND_CHECK(cudssConfigCreate(&solverConfig), dss_status, "cudssCreateConfig B");
+    CUDSS_CALL_AND_CHECK(cudssDataCreate(dss_handle, &solverData), dss_status, "cudssCreateData B");
+
+    cudssMatrix_t d_BtB_matrix_cudss;
+    CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(
+        &d_BtB_matrix_cudss,
+        m,
+        m,
+        nnz_BtB,
+        d_BtB_row_ptr,
+        NULL,
+        d_BtB_col_ind,
+        d_BtB_values,
         CUDA_R_32I,
         CUDA_R_64F,
-        CUDSS_MTYPE_GENERAL,
+        CUDSS_MTYPE_SPD,
         CUDSS_MVIEW_FULL,
         CUDSS_BASE_ZERO
     ), dss_status, "cudssMatrixCreateCsr for B");
 
+    // Convert B^T from sparse CSR to dense format for RHS (column-major)
+    f_t* d_Bt_dense;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_dense, m * m * sizeof(f_t)), "cudaMalloc d_Bt_dense");
+    CUDA_CALL_AND_CHECK(cudaMemset(d_Bt_dense, 0, m * m * sizeof(f_t)), "cudaMemset d_Bt_dense");
+    
+    // Convert CSR to dense in column-major format
+    std::vector<f_t> Bt_dense_host(m * m, 0.0);
+    for (i_t row = 0; row < m; ++row) {
+        for (i_t idx = B_t_csr.row_start[row]; idx < B_t_csr.row_start[row + 1]; ++idx) {
+            i_t col = B_t_csr.j[idx];
+            // Column-major: element (row, col) is at index col * m + row
+            Bt_dense_host[col * m + row] = B_t_csr.x[idx];
+        }
+    }
+    CUDA_CALL_AND_CHECK(cudaMemcpy(d_Bt_dense, Bt_dense_host.data(), m * m * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_Bt_dense");
+    
+    cudssMatrix_t d_Bt_matrix_cudss;
+    CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(
+        &d_Bt_matrix_cudss,
+        m,
+        m,
+        m,
+        d_Bt_dense,
+        CUDA_R_64F,
+        CUDSS_LAYOUT_COL_MAJOR
+    ), dss_status, "cudssMatrixCreateDn for B_T");
+
+    cudssMatrix_t d_X_matrix_cudss; // This is the pseudo-inverse of B
+    CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(
+        &d_X_matrix_cudss,
+        m,
+        m,
+        m,
+        d_X,
+        CUDA_R_64F,
+        CUDSS_LAYOUT_COL_MAJOR
+    ), dss_status, "cudssMatrixCreateDn for X");
+
     CUDSS_CALL_AND_CHECK(cudssExecute(
-        dss_handle_bt,
+        dss_handle,
         CUDSS_PHASE_ANALYSIS,
-        solverConfig_bt,
-        solverData_bt,
-        d_Bt_matrix,
-        NULL,
-        NULL
+        solverConfig,
+        solverData,
+        d_BtB_matrix_cudss,
+        d_X_matrix_cudss,
+        d_Bt_matrix_cudss
     ), dss_status, "cudssExecute Analysis for B");
     
     CUDSS_CALL_AND_CHECK(cudssExecute(
-        dss_handle_bt,
-        factorization_phase,
-        solverConfig_bt,
-        solverData_bt,
-        d_Bt_matrix,
-        NULL,
-        NULL
+        dss_handle,
+        CUDSS_PHASE_FACTORIZATION,
+        solverConfig,
+        solverData,
+        d_BtB_matrix_cudss,
+        d_X_matrix_cudss,
+        d_Bt_matrix_cudss
     ), dss_status, "cudssExecute Factorization for B");
 
+    CUDSS_CALL_AND_CHECK(cudssExecute(
+        dss_handle,
+        CUDSS_PHASE_SOLVE,
+        solverConfig,
+        solverData,
+        d_BtB_matrix_cudss,
+        d_X_matrix_cudss,
+        d_Bt_matrix_cudss
+    ), dss_status, "cudssExecute Solve for B");
 
-    // Get permutation vector q
-    q.resize(m);
-    CUDSS_CALL_AND_CHECK(cudssDataGet(
-        dss_handle_b,
-        solverData_b,
-        CUDSS_DATA_PERM_REORDER_COL,
-        q.data(),
-        m * sizeof(i_t),
-        nullptr
-    ), dss_status, "cudssDataGet for permutation q");
+    // cuDSS cleanup
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_BtB_matrix_cudss), dss_status, "cudssMatrixDestroy B_T B");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_Bt_matrix_cudss), dss_status, "cudssMatrixDestroy B_T");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_X_matrix_cudss), dss_status, "cudssMatrixDestroy X");
+    CUDSS_CALL_AND_CHECK(cudssDataDestroy(dss_handle, solverData), dss_status, "cudssDataDestroy B");
+    CUDSS_CALL_AND_CHECK(cudssConfigDestroy(solverConfig), dss_status, "cudssConfigDestroy B");
+    CUDSS_CALL_AND_CHECK(cudssDestroy(dss_handle), dss_status, "cudssDestroyHandle B");
+
+    CUDA_CALL_AND_CHECK(cudaFree(d_Bt_dense), "cudaFree d_Bt_dense");
+    // Note: d_X is not freed here - caller will free it after use
 
     return 0;
 }
@@ -279,22 +487,6 @@ dual::status_t dual_phase2_cu(
     assert(superbasic_list.size() == 0);
     assert(nonbasic_list.size() == n - m);
 
-    // CUDSS Initialization
-    cudssStatus_t dss_status = CUDSS_STATUS_SUCCESS;
-
-    cudssHandle_t dss_handle_b, dss_handle_bt;
-    CUDSS_CALL_AND_CHECK(cudssCreate(&dss_handle_b), dss_status, "cudssCreateHandle B");
-    CUDSS_CALL_AND_CHECK(cudssCreate(&dss_handle_bt), dss_status, "cudssCreateHandle BTran");
-
-    cudssConfig_t solverConfig_b, solverConfig_bt;
-    cudssData_t solverData_b, solverData_bt;
-    CUDSS_CALL_AND_CHECK(cudssConfigCreate(&solverConfig_b), dss_status, "cudssCreateConfig B");
-    CUDSS_CALL_AND_CHECK(cudssDataCreate(dss_handle_b, &solverData_b), dss_status, "cudssCreateData B");
-    CUDSS_CALL_AND_CHECK(cudssConfigCreate(&solverConfig_bt), dss_status, "cudssCreateConfig BTran");
-    CUDSS_CALL_AND_CHECK(cudssDataCreate(dss_handle_bt, &solverData_bt), dss_status, "cudssCreateData BTran");
-
-    cudssMatrix_t d_B_matrix, d_Bt_matrix;
-
     // Compute L*U = A(p, basic_list)
     csc_matrix_t<i_t, f_t> L(m, m, 1);
     csc_matrix_t<i_t, f_t> U(m, m, 1);
@@ -314,14 +506,24 @@ dual::status_t dual_phase2_cu(
         }
         settings.log.printf("Basis repaired\n");
     }
-    std::vector<i_t> q_;
-    phase2_cu::factorize_and_repair<i_t, f_t>(
-        m, n, lp.A, basic_list, false, q,
-        dss_handle_b, solverConfig_b, solverData_b, d_B_matrix,
-        dss_handle_bt, solverConfig_bt, solverData_bt, d_Bt_matrix
+
+    f_t* d_D_pinv;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_D_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
+    phase2_cu::compute_inverse<i_t, f_t>(
+        m,
+        n,
+        lp.A,
+        basic_list,
+        d_D_pinv
     );
+
     if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
     assert(q.size() == m);
+    std::vector<f_t> c_basic_noshuffle(m);
+    for (i_t k = 0; k < m; ++k) {
+        const i_t j = basic_list[k];
+        c_basic_noshuffle[k] = objective[j];
+    }
     reorder_basic_list(q, basic_list);
     basis_update_mpf_t<i_t, f_t> ft(L, U, p, settings.refactor_frequency);
 
@@ -335,42 +537,45 @@ dual::status_t dual_phase2_cu(
     f_t* d_c_basic, *d_y;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_c_basic, m * sizeof(f_t)), "cudaMalloc d_c_basic");
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_y, m * sizeof(f_t)), "cudaMalloc d_y");
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_c_basic, c_basic.data(), m * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_c_basic");
-    cudssMatrix_t d_c_basic_matrix, d_y_matrix;
-    CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(
-        &d_c_basic_matrix,
+    CUDA_CALL_AND_CHECK(cudaMemcpy(d_c_basic, c_basic_noshuffle.data(), m * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_c_basic");
+
+    const f_t alpha = 1.0;
+    const f_t beta  = 0.0;
+    cublasHandle_t cublas_handle;
+    CUBLAS_CALL_AND_CHECK(cublasCreate(&cublas_handle), "cublasCreate");
+    CUBLAS_CALL_AND_CHECK(cublasDgemv(
+        cublas_handle,
+        CUBLAS_OP_N,
         m,
-        1,
+        m,
+        &alpha,
+        d_D_pinv,
         m,
         d_c_basic,
-        CUDA_R_64F,
-        CUDSS_LAYOUT_COL_MAJOR
-    ), dss_status, "cudssMatrixCreateDn for c_basic");
-    CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(
-        &d_y_matrix,
-        m,
         1,
-        m,
+        &beta,
         d_y,
-        CUDA_R_64F,
-        CUDSS_LAYOUT_COL_MAJOR
-    ), dss_status, "cudssMatrixCreateDn for y");
-
-    CUDSS_CALL_AND_CHECK(cudssExecute(
-        dss_handle_bt,
-        CUDSS_PHASE_SOLVE,
-        solverConfig_bt,
-        solverData_bt,
-        d_Bt_matrix,
-        d_y_matrix,
-        d_c_basic_matrix
-    ), dss_status, "cudssExecute Solve for y");
+        1
+    ), "cublasDgemv to compute y = D_pinv * c_basic");
 
     CUDA_CALL_AND_CHECK(cudaMemcpy(y.data(), d_y, m * sizeof(f_t), cudaMemcpyDeviceToHost), "cudaMemcpy y");
+    
+    // Cleanup GPU resources
+    CUBLAS_CALL_AND_CHECK(cublasDestroy(cublas_handle), "cublasDestroy");
+    CUDA_CALL_AND_CHECK(cudaFree(d_c_basic), "cudaFree d_c_basic");
+    CUDA_CALL_AND_CHECK(cudaFree(d_y), "cudaFree d_y");
+    CUDA_CALL_AND_CHECK(cudaFree(d_D_pinv), "cudaFree d_D_pinv");
+    
     if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
 
     // DEBUG: Compare with the CPU solution
     std::vector<f_t> y_ref(m);
+    // Shuffle y according to q
+    std::vector<f_t> y_shuffled(m);
+    for (i_t k = 0; k < m; ++k) {
+        y_shuffled[k] = y[q[k]];
+    }
+
     ft.b_transpose_solve(c_basic, y_ref);
     for (i_t i = 0; i < m; ++i) {
         if (std::abs(y[i] - y_ref[i]) > 1e-6) {
@@ -1077,19 +1282,6 @@ dual::status_t dual_phase2_cu(
         ft.print_stats();
         }
     }
-
-    // CUDSS Cleanup
-    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_B_matrix), dss_status, "cudssMatrixDestroy for B");
-    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_Bt_matrix), dss_status, "cudssMatrixDestroy for Bt");
-
-    CUDSS_CALL_AND_CHECK(cudssDataDestroy(dss_handle_b, solverData_b), dss_status, "cudssDataDestroy for solverData B");
-    CUDSS_CALL_AND_CHECK(cudssConfigDestroy(solverConfig_b), dss_status, "cudssConfigDestroy for solverConfig B");
-    CUDSS_CALL_AND_CHECK(cudssDestroy(dss_handle_b), dss_status, "cudssDestroy for dss_handle B");
-
-    CUDSS_CALL_AND_CHECK(cudssDataDestroy(dss_handle_bt, solverData_bt), dss_status, "cudssDataDestroy for solverData BTran");
-    CUDSS_CALL_AND_CHECK(cudssConfigDestroy(solverConfig_bt), dss_status, "cudssConfigDestroy for solverConfig BTran");
-    CUDSS_CALL_AND_CHECK(cudssDestroy(dss_handle_bt), dss_status, "cudssDestroy for dss_handle BTran");
-
 
     return status;
 }
