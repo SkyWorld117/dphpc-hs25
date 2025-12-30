@@ -1,0 +1,38 @@
+BasedOnStyle:  LLVM
+IndentWidth:   4
+TabWidth:      4
+UseTab:        Never
+
+# Braces
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: False
+
+# Spaces
+SpaceAfterCStyleCast: true
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpacesInAngles: false
+
+# Alignments
+# AlignConsecutiveAssignments: true
+# AlignConsecutiveDeclarations: true
+AlignConsecutiveMacros: true
+AlignAfterOpenBracket: Align
+ColumnLimit:     100  # original code keeps lines reasonably short but not ultra strict
+
+# Enums and lists
+AlignTrailingComments: true
+Cpp11BracedListStyle: false
+
+# Includes
+IncludeBlocks: Preserve
+# SortIncludes:  false
+
+# Other
+KeepEmptyLinesAtTheStartOfBlocks: false
+PointerAlignment: Right
+DerivePointerAlignment: true
