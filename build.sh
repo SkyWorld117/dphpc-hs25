@@ -18,7 +18,7 @@ echo "CompileFlags:
     -  --cuda-gpu-arch=sm_90
     -  -L$FROMAGER_ENV/system/lib64
     -  -I$FROMAGER_ENV/system/include
-    -  -I/scratch/zyi/MyPackages/libcudss-0.7.1.4/include
+    -  -I$CUDSS_DIR/include
     -  -I$PWD/src
     -  -I$PWD/include
 " > .clangd
@@ -33,7 +33,7 @@ if os.path.exists(db_path):
         data = json.load(f)
     
     target_file = '$PWD/src/dual_simplex/phase2_dual.cu'
-    new_cmd = '/scratch/sherrman/.fromager/cellars/system/bin/nvcc -O3 -DNDEBUG -lineinfo -std=c++17 -Werror=cross-execution-space-call -Wno-deprecated-declarations -Wno-error=non-template-friend -fopenmp -lineinfo -x cu -c $PWD/src/dual_simplex/phase2_dual.cu -o CMakeFiles/cuopt.dir/src/dual_simplex/phase2_dual.cu.o'
+    new_cmd = '$FROMAGER_ENV/system/bin/nvcc -O3 -DNDEBUG -lineinfo -std=c++17 -Werror=cross-execution-space-call -Wno-deprecated-declarations -Wno-error=non-template-friend -fopenmp -lineinfo -x cu -c $PWD/src/dual_simplex/phase2_dual.cu -o CMakeFiles/cuopt.dir/src/dual_simplex/phase2_dual.cu.o'
     
     for entry in data:
         if entry['file'] == target_file:
