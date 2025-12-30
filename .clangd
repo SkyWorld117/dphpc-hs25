@@ -1,0 +1,11 @@
+# If:
+#   PathMatch: [.*\.cu]
+CompileFlags:
+  Add:
+    -  --cuda-path=/scratch/sherrman/.fromager/cellars/system/
+    -  --cuda-gpu-arch=sm_90
+    -  -L/cm/shared/apps/cuda12.8/toolkit/12.8.0/lib64
+    -  -I/cm/shared/apps/cuda12.8/toolkit/12.8.0/include
+    -  -I/scratch/zyi/MyPackages/libcudss-0.7.1.4/include
+    -  -I/scratch/sherrman/dphpc/dphpc-hs25/src
+    -  -I/scratch/sherrman/dphpc/dphpc-hs25/include
