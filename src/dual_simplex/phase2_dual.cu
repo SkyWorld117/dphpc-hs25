@@ -454,7 +454,7 @@ dual::status_t dual_phase2_cu(
     assert(superbasic_list.size() == 0);
     assert(nonbasic_list.size() == n - m);
 
-    // Compute L*U = A(p, basic_list)
+    // Compute Moore-Penrose pseudo-inverse of B
     f_t* d_B_pinv;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
     phase2_cu::compute_inverse<i_t, f_t>(
@@ -473,35 +473,16 @@ dual::status_t dual_phase2_cu(
     }
 
     // Solve B'*y = cB
-    f_t* d_c_basic, *d_y;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_c_basic, m * sizeof(f_t)), "cudaMalloc d_c_basic");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_y, m * sizeof(f_t)), "cudaMalloc d_y");
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_c_basic, c_basic.data(), m * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_c_basic");
-
-    const f_t alpha = 1.0;
-    const f_t beta  = 0.0;
     cublasHandle_t cublas_handle;
     CUBLAS_CALL_AND_CHECK(cublasCreate(&cublas_handle), "cublasCreate");
-    CUBLAS_CALL_AND_CHECK(cublasDgemv(
+    phase2::pinv_solve(
         cublas_handle,
-        CUBLAS_OP_T,
-        m,
-        m,
-        &alpha,
         d_B_pinv,
+        c_basic,
+        y,
         m,
-        d_c_basic,
-        1,
-        &beta,
-        d_y,
-        1
-    ), "cublasDgemv to compute y = D_pinv * c_basic");
-
-    CUDA_CALL_AND_CHECK(cudaMemcpy(y.data(), d_y, m * sizeof(f_t), cudaMemcpyDeviceToHost), "cudaMemcpy y");
-
-    // Cleanup GPU resources
-    CUDA_CALL_AND_CHECK(cudaFree(d_c_basic), "cudaFree d_c_basic");
-    CUDA_CALL_AND_CHECK(cudaFree(d_y), "cudaFree d_y");
+        true
+    );
 
     if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
 
