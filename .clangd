@@ -2,7 +2,7 @@
 #   PathMatch: [.*\.cu]
 CompileFlags:
   Add:
-    -  --cuda-path=/cm/shared/apps/cuda12.8/toolkit/12.8.0
+    -  --cuda-path=/scratch/sherrman/.fromager/cellars/system/
     -  --cuda-gpu-arch=sm_90
     -  -L/cm/shared/apps/cuda12.8/toolkit/12.8.0/lib64
     -  -I/cm/shared/apps/cuda12.8/toolkit/12.8.0/include
