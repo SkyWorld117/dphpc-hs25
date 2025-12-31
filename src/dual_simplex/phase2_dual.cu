@@ -10,10 +10,12 @@ namespace cuopt::linear_programming::dual_simplex {
 namespace phase2_cu {
 
 template <typename i_t>
-__global__ void count_basis_rows_kernel(i_t m, const i_t *__restrict__ A_col_start,
-                                        const i_t *__restrict__ A_row_ind,
-                                        const i_t *__restrict__ basic_list,
-                                        i_t *__restrict__ row_counts) {
+__global__ void count_basis_rows_kernel(
+    i_t m, const i_t *__restrict__ A_col_start,
+    const i_t *__restrict__ A_row_ind,
+    const i_t *__restrict__ basic_list,
+    i_t *__restrict__ row_counts
+) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m)
         return;
@@ -30,10 +32,12 @@ __global__ void count_basis_rows_kernel(i_t m, const i_t *__restrict__ A_col_sta
 
 template <typename i_t, typename f_t>
 __global__ void
-fill_basis_csr_kernel(i_t m, const i_t *__restrict__ A_col_start, const i_t *__restrict__ A_row_ind,
-                      const f_t *__restrict__ A_values, const i_t *__restrict__ basic_list,
-                      i_t *__restrict__ write_offsets, i_t *__restrict__ B_col_ind,
-                      f_t *__restrict__ B_values) {
+fill_basis_csr_kernel(
+    i_t m, const i_t *__restrict__ A_col_start, const i_t *__restrict__ A_row_ind,
+    const f_t *__restrict__ A_values, const i_t *__restrict__ basic_list,
+    i_t *__restrict__ write_offsets, i_t *__restrict__ B_col_ind,
+    f_t *__restrict__ B_values
+) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m)
         return;
@@ -60,9 +64,11 @@ fill_basis_csr_kernel(i_t m, const i_t *__restrict__ A_col_start, const i_t *__r
 
 // Helper function to orchestrate the basis construction on device
 template <typename i_t, typename f_t>
-void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_ind,
-                           const f_t *d_A_values, const i_t *d_basic_list, i_t *&d_B_row_ptr,
-                           i_t *&d_B_col_ind, f_t *&d_B_values, i_t &nz_B) {
+void build_basis_on_device(
+    i_t m, const i_t *d_A_col_start, const i_t *d_A_row_ind,
+    const f_t *d_A_values, const i_t *d_basic_list, i_t *&d_B_row_ptr,
+    i_t *&d_B_col_ind, f_t *&d_B_values, i_t &nz_B, cudaStream_t stream
+) {
     // 1. Allocate and compute row counts
     // Initialize row counts to 0
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_row_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_B_row_ptr");
@@ -73,7 +79,7 @@ void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_i
     int block_size = 256;
     int grid_size = (m + block_size - 1) / block_size;
 
-    count_basis_rows_kernel<<<grid_size, block_size>>>(m, d_A_col_start, d_A_row_ind, d_basic_list,
+    count_basis_rows_kernel<<<grid_size, block_size, 0, stream>>>(m, d_A_col_start, d_A_row_ind, d_basic_list,
                                                        d_B_row_ptr);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "count_basis_rows_kernel");
 
@@ -81,7 +87,7 @@ void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_i
     // We use thrust for exclusive scan. d_B_row_ptr currently holds counts.
     // exclusive_scan on [0, m+1) will transform counts to offsets.
     thrust::device_ptr<i_t> dev_ptr = thrust::device_pointer_cast(d_B_row_ptr);
-    thrust::exclusive_scan(dev_ptr, dev_ptr + m + 1, dev_ptr);
+    thrust::exclusive_scan(thrust::cuda::par.on(stream), dev_ptr, dev_ptr + m + 1, dev_ptr, i_t(0));
 
     // Get total NNZ (stored in the last element after scan)
     i_t total_nz;
@@ -103,7 +109,7 @@ void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_i
         cudaMemcpy(d_write_offsets, d_B_row_ptr, (m + 1) * sizeof(i_t), cudaMemcpyDeviceToDevice),
         "cudaMemcpy d_write_offsets");
 
-    fill_basis_csr_kernel<<<grid_size, block_size>>>(m, d_A_col_start, d_A_row_ind, d_A_values,
+    fill_basis_csr_kernel<<<grid_size, block_size, 0, stream>>>(m, d_A_col_start, d_A_row_ind, d_A_values,
                                                      d_basic_list, d_write_offsets, d_B_col_ind,
                                                      d_B_values);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "fill_basis_csr_kernel");
@@ -160,7 +166,7 @@ template <typename i_t, typename f_t>
 void build_basis_transpose_on_device(
     i_t m, const i_t *d_A_col_start,
     const i_t *d_A_row_ind, const f_t *d_A_values, const i_t *d_basic_list,
-    i_t *&d_Bt_row_ptr, i_t *&d_Bt_col_ind, f_t *&d_Bt_values, i_t &nz_Bt
+    i_t *&d_Bt_row_ptr, i_t *&d_Bt_col_ind, f_t *&d_Bt_values, i_t &nz_Bt, cudaStream_t stream
 ) {
     // 1. Allocate and compute column counts for B_T
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_row_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_Bt_row_ptr");
@@ -171,14 +177,14 @@ void build_basis_transpose_on_device(
     int block_size = 256;
     int grid_size = (m + block_size - 1) / block_size;
 
-    count_basis_transpose_rows_kernel<<<grid_size, block_size>>>(
+    count_basis_transpose_rows_kernel<<<grid_size, block_size, 0, stream>>>(
         m, d_A_col_start, d_A_row_ind, d_basic_list, d_Bt_row_ptr
     );
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "count_basis_transpose_rows_kernel");
 
     // 2. Prefix sum to get row pointers for B_T
     thrust::device_ptr<i_t> dev_ptr = thrust::device_pointer_cast(d_Bt_row_ptr);
-    thrust::exclusive_scan(dev_ptr, dev_ptr + m + 1, dev_ptr);
+    thrust::exclusive_scan(thrust::cuda::par.on(stream), dev_ptr, dev_ptr + m + 1, dev_ptr, i_t(0));
 
     // Get total NNZ for B_T
     i_t total_nz;
@@ -191,7 +197,7 @@ void build_basis_transpose_on_device(
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_values, total_nz * sizeof(f_t)), "cudaMalloc d_Bt_values");
 
     // 4. Fill CSR structure for B_T
-    fill_basis_transpose_csr_kernel<<<grid_size, block_size>>>(
+    fill_basis_transpose_csr_kernel<<<grid_size, block_size, 0, stream>>>(
         m, d_A_col_start, d_A_row_ind, d_A_values, d_basic_list,
         d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values
     );
@@ -226,7 +232,7 @@ template<typename i_t, typename f_t>
 void build_basis_transpose_on_device_dense(
     i_t m, const i_t *d_A_col_start,
     const i_t *d_A_row_ind, const f_t *d_A_values, const i_t *d_basic_list,
-    f_t *&d_Bt_dense
+    f_t *&d_Bt_dense, cudaStream_t stream
 ) {
     // Initialize d_Bt_dense to zero
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_dense, m * m * sizeof(f_t)), "cudaMalloc d_Bt_dense");
@@ -236,7 +242,7 @@ void build_basis_transpose_on_device_dense(
     int grid_size = (m + block_size - 1) / block_size;
 
     // Kernel to fill dense B_T
-    fill_basis_transpose_dense_kernel<<<grid_size, block_size>>>(
+    fill_basis_transpose_dense_kernel<<<grid_size, block_size, 0, stream>>>(
         m, d_A_col_start, d_A_row_ind, d_A_values, d_basic_list, d_Bt_dense
     );
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "fill_basis_transpose_dense_kernel");
@@ -289,6 +295,12 @@ i_t compute_inverse(
         cudaMemcpy(d_basic_list, basic_list.data(), m * sizeof(i_t), cudaMemcpyHostToDevice),
         "cudaMemcpy d_basic_list");
 
+    // Assemble the three matrices in parallel
+    cudaStream_t stream1, stream2, stream3;
+    CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream1), "cudaStreamCreate stream1 (B)");
+    CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream2), "cudaStreamCreate stream2 (B_T)");
+    CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream3), "cudaStreamCreate stream3 (B_T dense)");
+
     // Assemble B in CSR format
     i_t* d_B_row_ptr;
     i_t* d_B_col_ind;
@@ -297,7 +309,8 @@ i_t compute_inverse(
 
     phase2_cu::build_basis_on_device<i_t, f_t>(
         m, d_A_col_ptr, d_A_row_ind, d_A_values,
-        d_basic_list, d_B_row_ptr, d_B_col_ind, d_B_values, nz_B
+        d_basic_list, d_B_row_ptr, d_B_col_ind, d_B_values, nz_B,
+        stream1
     );
 
     // Assemble B_T in CSR format
@@ -309,7 +322,8 @@ i_t compute_inverse(
 
     phase2_cu::build_basis_transpose_on_device<i_t, f_t>(
         m, d_A_col_ptr, d_A_row_ind, d_A_values,
-        d_basic_list, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, nz_Bt
+        d_basic_list, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, nz_Bt,
+        stream2
     );
 
     // Assemble B_T in dense format
@@ -317,8 +331,12 @@ i_t compute_inverse(
 
     phase2_cu::build_basis_transpose_on_device_dense(
         m, d_A_col_ptr, d_A_row_ind, d_A_values, 
-        d_basic_list, d_Bt_dense
+        d_basic_list, d_Bt_dense,
+        stream3
     );
+
+    // Synchronize streams before proceeding
+    CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(), "cudaDeviceSynchronize after matrix assembly");
 
     // Compute (B^T B) with cuSPARSE
     cusparseHandle_t cusparse_handle;
