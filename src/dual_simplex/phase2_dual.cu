@@ -121,21 +121,22 @@ void move_A_to_device(const csc_matrix_t<i_t, f_t> &A, i_t *&d_A_col_ptr, i_t *&
                       f_t *&d_A_values) {
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_A_col_ptr, (A.n + 1) * sizeof(i_t)),
                         "cudaMalloc d_A_row_ptr");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_A_row_ind, A.nz_max * sizeof(i_t)), "cudaMalloc d_A_col_ind");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_A_values, A.nz_max * sizeof(f_t)), "cudaMalloc d_A_values");
+    i_t nnz = A.col_start[A.n];
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_A_row_ind, nnz * sizeof(i_t)), "cudaMalloc d_A_col_ind");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_A_values, nnz * sizeof(f_t)), "cudaMalloc d_A_values");
 
     // Copy data to device
     // Column pointers
     CUDA_CALL_AND_CHECK(cudaMemcpy(d_A_col_ptr, A.col_start.data(), (A.n + 1) * sizeof(i_t),
                                    cudaMemcpyHostToDevice),
-                        "cudaMemcpy d_A_row_ptr");
+                        "cudaMemcpy d_A_col_ptr");
     // Row indices
     CUDA_CALL_AND_CHECK(
-        cudaMemcpy(d_A_row_ind, A.i.data(), A.nz_max * sizeof(i_t), cudaMemcpyHostToDevice),
-        "cudaMemcpy d_A_col_ind");
+        cudaMemcpy(d_A_row_ind, A.i.data(), nnz * sizeof(i_t), cudaMemcpyHostToDevice),
+        "cudaMemcpy d_A_row_ind");
     // Non-zero values
     CUDA_CALL_AND_CHECK(
-        cudaMemcpy(d_A_values, A.x.data(), A.nz_max * sizeof(f_t), cudaMemcpyHostToDevice),
+        cudaMemcpy(d_A_values, A.x.data(), nnz * sizeof(f_t), cudaMemcpyHostToDevice),
         "cudaMemcpy d_A_values");
 }
 
@@ -147,8 +148,6 @@ i_t compute_inverse(
     const std::vector<i_t>& basic_list,
     f_t*& d_X
 ) {
-    dual::status_t status = dual::status_t::UNSET;
-
     // Assemble B in CSR format
     csr_matrix_t<i_t, f_t> B_csr;
     B_csr.m = m;
@@ -217,7 +216,6 @@ i_t compute_inverse(
     f_t* d_B_values;
 
     // Debug comparison starts here
-    // FIXME: Sophia please fix this
     i_t *d_A_col_ptr = nullptr;
     i_t *d_A_row_ind = nullptr;
     f_t *d_A_values = nullptr;
@@ -266,12 +264,14 @@ i_t compute_inverse(
         }
     }
     // Compare B_dense_host and B_dense_cpu
+    i_t mismatch_count = 0;
     for (i_t row = 0; row < m; ++row) {
         for (i_t col = 0; col < m; ++col) {
             f_t val_host = B_dense_host[row][col];
             f_t val_cpu = B_dense_cpu[row][col];
             if (std::abs(val_host - val_cpu) > 1e-8) {
                 printf("Mismatch in B at (%d, %d): host %f vs cpu %f\n", row, col, val_host, val_cpu);
+                mismatch_count++;
             }
         }
     }
