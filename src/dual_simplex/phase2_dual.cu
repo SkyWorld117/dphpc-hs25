@@ -829,178 +829,148 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         const bool harris_ratio     = settings.use_harris_ratio;
         const bool bound_flip_ratio = settings.use_bound_flip_ratio;
         if (harris_ratio) {
-        f_t max_step_length = phase2::first_stage_harris(lp, vstatus, nonbasic_list, z, delta_z);
-        entering_index      = phase2::second_stage_harris(lp,
-                                                    vstatus,
-                                                    nonbasic_list,
-                                                    z,
-                                                    delta_z,
-                                                    max_step_length,
-                                                    step_length,
-                                                    nonbasic_entering_index);
+            f_t max_step_length = phase2::first_stage_harris(lp, vstatus, nonbasic_list, z, delta_z);
+            entering_index      = phase2::second_stage_harris(lp,
+                                                        vstatus,
+                                                        nonbasic_list,
+                                                        z,
+                                                        delta_z,
+                                                        max_step_length,
+                                                        step_length,
+                                                        nonbasic_entering_index);
         } else if (bound_flip_ratio) {
-        timers.start_timer();
-        f_t slope = direction == 1 ? (lp.lower[leaving_index] - x[leaving_index])
-                                    : (x[leaving_index] - lp.upper[leaving_index]);
-        bound_flipping_ratio_test_t<i_t, f_t> bfrt(settings,
-                                                    start_time,
-                                                    m,
-                                                    n,
-                                                    slope,
-                                                    lp.lower,
-                                                    lp.upper,
-                                                    bounded_variables,
-                                                    vstatus,
-                                                    nonbasic_list,
-                                                    z,
-                                                    delta_z,
-                                                    delta_z_indices,
-                                                    nonbasic_mark);
-        entering_index = bfrt.compute_step_length(step_length, nonbasic_entering_index);
-        timers.bfrt_time += timers.stop_timer();
+            timers.start_timer();
+            f_t slope = direction == 1 ? (lp.lower[leaving_index] - x[leaving_index])
+                                        : (x[leaving_index] - lp.upper[leaving_index]);
+            bound_flipping_ratio_test_t<i_t, f_t> bfrt(settings,
+                                                        start_time,
+                                                        m,
+                                                        n,
+                                                        slope,
+                                                        lp.lower,
+                                                        lp.upper,
+                                                        bounded_variables,
+                                                        vstatus,
+                                                        nonbasic_list,
+                                                        z,
+                                                        delta_z,
+                                                        delta_z_indices,
+                                                        nonbasic_mark);
+            entering_index = bfrt.compute_step_length(step_length, nonbasic_entering_index);
+            timers.bfrt_time += timers.stop_timer();
         } else {
-        entering_index = phase2::phase2_ratio_test(
-            lp, settings, vstatus, nonbasic_list, z, delta_z, step_length, nonbasic_entering_index);
+            entering_index = phase2::phase2_ratio_test(
+                lp, settings, vstatus, nonbasic_list, z, delta_z, step_length, nonbasic_entering_index);
         }
         if (entering_index == -2) { return dual::status_t::TIME_LIMIT; }
         if (entering_index == -3) { return dual::status_t::CONCURRENT_LIMIT; }
         if (entering_index == -1) {
-        settings.log.printf("No entering variable found. Iter %d\n", iter);
-        settings.log.printf("Scaled infeasibility %e\n", max_val);
-        f_t perturbation = phase2::amount_of_perturbation(lp, objective);
+            settings.log.printf("No entering variable found. Iter %d\n", iter);
+            settings.log.printf("Scaled infeasibility %e\n", max_val);
+            f_t perturbation = phase2::amount_of_perturbation(lp, objective);
 
-        if (perturbation > 0.0 && phase == 2) {
-            // Try to remove perturbation
-            std::vector<f_t> unperturbed_y(m);
-            std::vector<f_t> unperturbed_z(n);
-            phase2::compute_dual_solution_from_basis(
-            lp, cublas_handle, d_B_pinv, basic_list, nonbasic_list, unperturbed_y, unperturbed_z);
-            {
-            const f_t dual_infeas = phase2::dual_infeasibility(
-                lp, settings, vstatus, unperturbed_z, settings.tight_tol, settings.dual_tol);
-            settings.log.printf("Dual infeasibility after removing perturbation %e\n", dual_infeas);
-            if (dual_infeas <= settings.dual_tol) {
-                settings.log.printf("Removed perturbation of %.2e.\n", perturbation);
-                z            = unperturbed_z;
-                y            = unperturbed_y;
-                perturbation = 0.0;
+            if (perturbation > 0.0 && phase == 2) {
+                // Try to remove perturbation
+                std::vector<f_t> unperturbed_y(m);
+                std::vector<f_t> unperturbed_z(n);
+                phase2::compute_dual_solution_from_basis(
+                lp, cublas_handle, d_B_pinv, basic_list, nonbasic_list, unperturbed_y, unperturbed_z);
+                {
+                    const f_t dual_infeas = phase2::dual_infeasibility(
+                        lp, settings, vstatus, unperturbed_z, settings.tight_tol, settings.dual_tol);
+                    settings.log.printf("Dual infeasibility after removing perturbation %e\n", dual_infeas);
+                    if (dual_infeas <= settings.dual_tol) {
+                        settings.log.printf("Removed perturbation of %.2e.\n", perturbation);
+                        z            = unperturbed_z;
+                        y            = unperturbed_y;
+                        perturbation = 0.0;
 
-                std::vector<f_t> unperturbed_x(n);
-                phase2::compute_primal_solution_from_basis(
-                lp, cublas_handle, d_B_pinv, basic_list, nonbasic_list, vstatus, unperturbed_x);
-                x                    = unperturbed_x;
-                primal_infeasibility = phase2::compute_initial_primal_infeasibilities(
-                lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
-                settings.log.printf("Updated primal infeasibility: %e\n", primal_infeasibility);
+                        std::vector<f_t> unperturbed_x(n);
+                        phase2::compute_primal_solution_from_basis(
+                        lp, cublas_handle, d_B_pinv, basic_list, nonbasic_list, vstatus, unperturbed_x);
+                        x                    = unperturbed_x;
+                        primal_infeasibility = phase2::compute_initial_primal_infeasibilities(
+                        lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
+                        settings.log.printf("Updated primal infeasibility: %e\n", primal_infeasibility);
 
-                objective = lp.objective;
-                // Need to reset the objective value, since we have recomputed x
-                obj = phase2::compute_perturbed_objective(objective, x);
-                if (dual_infeas <= settings.dual_tol && primal_infeasibility <= settings.primal_tol) {
-                phase2::prepare_optimality(lp,
-                                            settings,
-                                            cublas_handle,
-                                            d_B_pinv,
-                                            objective,
-                                            basic_list,
-                                            nonbasic_list,
-                                            vstatus,
-                                            phase,
-                                            start_time,
-                                            max_val,
-                                            iter,
-                                            x,
-                                            y,
-                                            z,
-                                            sol);
-                status = dual::status_t::OPTIMAL;
-                break;
+                        objective = lp.objective;
+                        // Need to reset the objective value, since we have recomputed x
+                        obj = phase2::compute_perturbed_objective(objective, x);
+                        if (dual_infeas <= settings.dual_tol && primal_infeasibility <= settings.primal_tol) {
+                            phase2::prepare_optimality(lp,
+                                                        settings,
+                                                        cublas_handle,
+                                                        d_B_pinv,
+                                                        objective,
+                                                        basic_list,
+                                                        nonbasic_list,
+                                                        vstatus,
+                                                        phase,
+                                                        start_time,
+                                                        max_val,
+                                                        iter,
+                                                        x,
+                                                        y,
+                                                        z,
+                                                        sol);
+                            status = dual::status_t::OPTIMAL;
+                            break;
+                        }
+                        settings.log.printf(
+                            "Continuing with perturbation removed and steepest edge norms reset\n");
+                        // Clear delta_z before restarting the iteration
+                        phase2::clear_delta_z(
+                            entering_index, leaving_index, delta_z_mark, delta_z_indices, delta_z);
+                        continue;
+                    } else {
+                        std::vector<f_t> unperturbed_x(n);
+                        phase2::compute_primal_solution_from_basis(
+                            lp, cublas_handle, d_B_pinv, basic_list, nonbasic_list, vstatus, unperturbed_x);
+                        x                    = unperturbed_x;
+                        primal_infeasibility = phase2::compute_initial_primal_infeasibilities(
+                        lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
+
+                        const f_t orig_dual_infeas = phase2::dual_infeasibility(
+                            lp, settings, vstatus, z, settings.tight_tol, settings.dual_tol);
+
+                        if (primal_infeasibility <= settings.primal_tol &&
+                            orig_dual_infeas <= settings.dual_tol) {
+                            phase2::prepare_optimality(lp,
+                                                        settings,
+                                                        cublas_handle,
+                                                        d_B_pinv,
+                                                        objective,
+                                                        basic_list,
+                                                        nonbasic_list,
+                                                        vstatus,
+                                                        phase,
+                                                        start_time,
+                                                        max_val,
+                                                        iter,
+                                                        x,
+                                                        y,
+                                                        z,
+                                                        sol);
+                            status = dual::status_t::OPTIMAL;
+                            break;
+                        }
+                        settings.log.printf("Failed to remove perturbation of %.2e.\n", perturbation);
+                    }
                 }
+            }
+
+            const f_t dual_infeas =
+                phase2::dual_infeasibility(lp, settings, vstatus, z, settings.tight_tol, settings.dual_tol);
+            settings.log.printf("Dual infeasibility %e\n", dual_infeas);
+            const f_t primal_inf = phase2::primal_infeasibility(lp, settings, vstatus, x);
+            settings.log.printf("Primal infeasibility %e\n", primal_inf);
+            settings.log.printf("Steepest edge %e\n", max_val);
+            if (dual_infeas > settings.dual_tol) {
                 settings.log.printf(
-                "Continuing with perturbation removed and steepest edge norms reset\n");
-                // Clear delta_z before restarting the iteration
-                phase2::clear_delta_z(
-                entering_index, leaving_index, delta_z_mark, delta_z_indices, delta_z);
-                continue;
-            } else {
-                std::vector<f_t> unperturbed_x(n);
-                phase2::compute_primal_solution_from_basis(
-                lp, cublas_handle, d_B_pinv, basic_list, nonbasic_list, vstatus, unperturbed_x);
-                x                    = unperturbed_x;
-                primal_infeasibility = phase2::compute_initial_primal_infeasibilities(
-                lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
-
-                const f_t orig_dual_infeas = phase2::dual_infeasibility(
-                lp, settings, vstatus, z, settings.tight_tol, settings.dual_tol);
-
-                if (primal_infeasibility <= settings.primal_tol &&
-                    orig_dual_infeas <= settings.dual_tol) {
-                phase2::prepare_optimality(lp,
-                                            settings,
-                                            cublas_handle,
-                                            d_B_pinv,
-                                            objective,
-                                            basic_list,
-                                            nonbasic_list,
-                                            vstatus,
-                                            phase,
-                                            start_time,
-                                            max_val,
-                                            iter,
-                                            x,
-                                            y,
-                                            z,
-                                            sol);
-                status = dual::status_t::OPTIMAL;
-                break;
-                }
-                settings.log.printf("Failed to remove perturbation of %.2e.\n", perturbation);
+                    "Numerical issues encountered. No entering variable found with large infeasibility.\n");
+                return dual::status_t::NUMERICAL;
             }
-            }
-        }
-
-        if (perturbation == 0.0 && phase == 2) {
-            constexpr bool use_farkas = false;
-            if constexpr (use_farkas) {
-            std::vector<f_t> farkas_y;
-            std::vector<f_t> farkas_zl;
-            std::vector<f_t> farkas_zu;
-            f_t farkas_constant;
-            std::vector<f_t> my_delta_y;
-            delta_y_sparse.to_dense(my_delta_y);
-
-            // TODO(CMM): Do I use the perturbed or unperturbed objective?
-            const f_t obj_val = phase2::compute_perturbed_objective(objective, x);
-            phase2::compute_farkas_certificate(lp,
-                                                settings,
-                                                vstatus,
-                                                x,
-                                                y,
-                                                z,
-                                                my_delta_y,
-                                                delta_z,
-                                                direction,
-                                                leaving_index,
-                                                obj_val,
-                                                farkas_y,
-                                                farkas_zl,
-                                                farkas_zu,
-                                                farkas_constant);
-            }
-        }
-
-        const f_t dual_infeas =
-            phase2::dual_infeasibility(lp, settings, vstatus, z, settings.tight_tol, settings.dual_tol);
-        settings.log.printf("Dual infeasibility %e\n", dual_infeas);
-        const f_t primal_inf = phase2::primal_infeasibility(lp, settings, vstatus, x);
-        settings.log.printf("Primal infeasibility %e\n", primal_inf);
-        settings.log.printf("Steepest edge %e\n", max_val);
-        if (dual_infeas > settings.dual_tol) {
-            settings.log.printf(
-            "Numerical issues encountered. No entering variable found with large infeasibility.\n");
-            return dual::status_t::NUMERICAL;
-        }
-        return dual::status_t::DUAL_UNBOUNDED;
+            return dual::status_t::DUAL_UNBOUNDED;
         }
 
         timers.start_timer();
@@ -1008,7 +978,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         // y <- y + steplength * delta_y
         // z <- z + steplength * delta_z
         phase2::update_dual_variables(
-        delta_y_sparse, delta_z_indices, delta_z, step_length, leaving_index, y, z);
+            delta_y_sparse, delta_z_indices, delta_z, step_length, leaving_index, y, z);
         timers.vector_time += timers.stop_timer();
 
         timers.start_timer();
@@ -1031,18 +1001,18 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
 
         sparse_vector_t<i_t, f_t> delta_xB_0_sparse(m, 0);
         if (num_flipped > 0) {
-        timers.start_timer();
-        phase2::adjust_for_flips(cublas_handle,
-                                d_B_pinv,
-                                basic_list,
-                                delta_z_indices,
-                                atilde_index,
-                                atilde,
-                                atilde_mark,
-                                delta_xB_0_sparse,
-                                delta_x_flip,
-                                x);
-        timers.ftran_time += timers.stop_timer();
+            timers.start_timer();
+            phase2::adjust_for_flips(cublas_handle,
+                                    d_B_pinv,
+                                    basic_list,
+                                    delta_z_indices,
+                                    atilde_index,
+                                    atilde,
+                                    atilde_mark,
+                                    delta_xB_0_sparse,
+                                    delta_x_flip,
+                                    x);
+            timers.ftran_time += timers.stop_timer();
         }
 
         timers.start_timer();
@@ -1061,8 +1031,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                                     x,
                                     scaled_delta_xB_sparse,
                                     delta_x) == -1) {
-        settings.log.printf("Failed to compute delta_x. Iter %d\n", iter);
-        return dual::status_t::NUMERICAL;
+            settings.log.printf("Failed to compute delta_x. Iter %d\n", iter);
+            return dual::status_t::NUMERICAL;
         }
 
         timers.ftran_time += timers.stop_timer();
@@ -1222,15 +1192,6 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
 
     if (phase == 2) {
         timers.print_timers(settings);
-        constexpr bool print_stats = false;
-        if constexpr (print_stats) {
-            settings.log.printf("Sparse delta_z %8d %8.2f%\n",
-                                sparse_delta_z,
-                                100.0 * sparse_delta_z / (sparse_delta_z + dense_delta_z));
-            settings.log.printf("Dense delta_z  %8d %8.2f%\n",
-                                dense_delta_z,
-                                100.0 * dense_delta_z / (sparse_delta_z + dense_delta_z));
-        }
     }
 
     // Cleanup GPU resources
