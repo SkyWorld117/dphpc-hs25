@@ -21,6 +21,7 @@ import torch
 from torch.profiler import record_function
 from typing import Tuple, Optional
 import time
+import concurrent.futures
 
 from linsys_solvers import (
     _compute_basis_inverse,
@@ -37,7 +38,7 @@ from pivot_methods import _pivot_dantzig, _pivot_bland, _pivot_dual_steepest_edg
 # Device configuration - will use GPU if available
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64  # Use double precision for numerical stability
-SOLVER = "lu"  # Solver for linear systems ['cg', 'pinv', 'lu']
+SOLVER = "pinv"  # Solver for linear systems ['cg', 'pinv', 'lu']
 PIVOTING = "dual_steepest_edge"  # Pivoting rule ['dantzig', 'bland', 'dual_steepest_edge']
 
 LOG_FREQ = 200 # Frequency of logging during iterations
@@ -109,7 +110,10 @@ def dualsimplex(
     eps: Optional[float] = None,
     ibudget: int = 50000,
     return_basis: bool = False,
-    refactor_interval: int = 100
+    refactor_interval: int = 100,
+    pivoting_strategies: Optional[Tuple[str, str]] = ("dual_steepest_edge","dantzig"),
+    reconvene_interval: int = 100,
+    maximize: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[torch.Tensor]]:
     """
     Solve a primal problem of the form:
@@ -148,6 +152,12 @@ def dualsimplex(
     refactor_interval : int, optional
         Number of iterations between full pseudo-inverse recomputation (default: 100).
         Lower values improve numerical stability but reduce performance.
+    pivoting_strategies : tuple of str, optional
+        Two pivoting rules to race in parallel (default: None)
+    reconvene_interval : int, optional
+        Number of iterations between reconvene points when racing pivoting strategies (default: 100)
+    maximize : bool, optional
+        Whether to maximize or minimize the objective (default: True)
     
     Returns
     -------
@@ -334,9 +344,271 @@ def dualsimplex(
     newsol = torch.dot(bpiv[:n], Y[:n])
     oldsol = newsol + 1.0
 
+    def _compute_slack_inplace(apiv_local: torch.Tensor, bpiv_local: torch.Tensor, X_local: torch.Tensor, S_local: torch.Tensor) -> None:
+        # S = bpiv[n:] - apiv[:, n:].T @ X
+        torch.mv(apiv_local[:, n:].T, X_local, out=S_local)
+        S_local.neg_().add_(bpiv_local[n:])
+
+    def _refactor_and_resolve(
+        apiv_local: torch.Tensor,
+        bpiv_local: torch.Tensor,
+        C_local: torch.Tensor,
+        X_local: torch.Tensor,
+        Y_local: torch.Tensor,
+    ):
+        """
+        Full recompute of basis factorization and consistent X/Y for the current basis.
+        Returns (B_inv_new, LU_new, pivots_new, B_basis_new).
+        """
+        if SOLVER == "pinv":
+            B_inv_new = _compute_basis_inverse(apiv_local[:, :n])
+            _solve_with_inverse(B_inv_new, C_local, out=Y_local[:n])
+            _solve_with_inverse(B_inv_new, bpiv_local[:n], trans=True, out=X_local)
+            return B_inv_new, None, None, None
+
+        if SOLVER == "lu":
+            LU_new, piv_new = _compute_lu_factorization(apiv_local[:, :n])
+            _solve_with_lu(LU_new, piv_new, C_local, out=Y_local[:n])
+            _solve_with_lu(LU_new, piv_new, bpiv_local[:n], trans=True, out=X_local)
+            return None, LU_new, piv_new, None
+
+        if SOLVER == "cg":
+            B_basis_new = apiv_local[:, :n].clone()
+            _solve_with_conjugate_gradient(B_basis_new, C_local, out=Y_local[:n])
+            _solve_with_conjugate_gradient(B_basis_new, bpiv_local[:n], trans=True, out=X_local)
+            return None, None, None, B_basis_new
+
+        raise ValueError(f"Unknown solver: {SOLVER}")
+
+    def _run_block(rule: str, state: dict, block_iters: int):
+        """
+        Run up to `block_iters` iterations starting from `state`.
+        Returns: (status, state, obj)
+          status: "continue" | "optimal" | "unbounded"
+        """
+        # Ensure each thread uses its own CUDA stream (best-effort)
+        stream = None
+        if state["apiv"].is_cuda:
+            # Keep device consistent per thread
+            torch.cuda.set_device(state["apiv"].device.index or 0)
+            stream = torch.cuda.Stream()
+
+        def _body():
+            apiv_l = state["apiv"]
+            bpiv_l = state["bpiv"]
+            jpiv_l = state["jpiv"]
+            X_l = state["X"]
+            Y_l = state["Y"]
+            S_l = state["S"]
+
+            B_inv_l = state.get("B_inv", None)
+            LU_l = state.get("LU", None)
+            piv_l = state.get("pivots", None)
+            B_basis_l = state.get("B_basis", None)
+            iters_since_ref = int(state.get("iters_since_refactor", 0))
+
+            # Thread-local working buffers (avoid shared globals)
+            col_buf = torch.empty(n, device=apiv_l.device, dtype=apiv_l.dtype)
+            eta_buf = torch.empty(n, device=apiv_l.device, dtype=apiv_l.dtype)
+            pivot_row_buf_l = torch.empty(n, device=apiv_l.device, dtype=apiv_l.dtype)
+            Y_n_buf_l = torch.empty(n, device=apiv_l.device, dtype=apiv_l.dtype)
+
+            if rule == "dantzig":
+                pivot_fn = _pivot_dantzig
+            elif rule == "bland":
+                pivot_fn = _pivot_bland
+            elif rule == "dual_steepest_edge":
+                pivot_fn = _pivot_dual_steepest_edge
+            else:
+                raise ValueError(f"Unknown pivoting rule: {rule}")
+
+            for _ in range(block_iters):
+                ienter, iexit = pivot_fn(n, m, apiv_l, Y_l, S_l, SOLVER, B_basis_l, B_inv_l, LU_l, piv_l, eps)
+                if iexit is None:
+                    return "unbounded"
+
+                # Compute eta column BEFORE swapping
+                if SOLVER == "pinv":
+                    _solve_with_inverse(B_inv_l, apiv_l[:, ienter], out=eta_buf)
+                elif SOLVER == "lu":
+                    _solve_with_lu(LU_l, piv_l, apiv_l[:, ienter], out=eta_buf)
+                elif SOLVER == "cg":
+                    _solve_with_conjugate_gradient(B_basis_l, apiv_l[:, ienter], out=eta_buf)
+                else:
+                    raise ValueError(f"Unknown solver: {SOLVER}")
+
+                # Swap columns in apiv
+                col_buf.copy_(apiv_l[:, iexit])
+                apiv_l[:, iexit].copy_(apiv_l[:, ienter])
+                apiv_l[:, ienter].copy_(col_buf)
+
+                # Swap bpiv entries
+                tmp_b = bpiv_l[iexit].item()
+                bpiv_l[iexit] = bpiv_l[ienter]
+                bpiv_l[ienter] = tmp_b
+
+                # Swap tracking indices
+                tmp_j = jpiv_l[iexit].item()
+                jpiv_l[iexit] = jpiv_l[ienter]
+                jpiv_l[ienter] = tmp_j
+
+                # Update factorization and resolve X/Y
+                if SOLVER == "pinv":
+                    iters_since_ref += 1
+                    if iters_since_ref >= refactor_interval:
+                        B_inv_l = _compute_basis_inverse(apiv_l[:, :n])
+                        iters_since_ref = 0
+                    else:
+                        _apply_eta_update(B_inv_l, eta_buf, iexit, pivot_row_buf_l)
+
+                    _solve_with_inverse(B_inv_l, C, out=Y_n_buf_l)
+                    Y_l[:n].copy_(Y_n_buf_l)
+                    _solve_with_inverse(B_inv_l, bpiv_l[:n], trans=True, out=X_l)
+
+                elif SOLVER == "lu":
+                    iters_since_ref += 1
+                    if iters_since_ref >= refactor_interval:
+                        LU_l, piv_l = _compute_lu_factorization(apiv_l[:, :n])
+                        iters_since_ref = 0
+                    else:
+                        _apply_forrest_tomlin_update(LU_l, piv_l, eta_buf, iexit)
+
+                    _solve_with_lu(LU_l, piv_l, C, out=Y_n_buf_l)
+                    Y_l[:n].copy_(Y_n_buf_l)
+                    _solve_with_lu(LU_l, piv_l, bpiv_l[:n], trans=True, out=X_l)
+
+                elif SOLVER == "cg":
+                    if B_basis_l is None or B_basis_l.shape != (n, n):
+                        B_basis_l = apiv_l[:, :n].clone()
+                    B_basis_l[:, iexit].copy_(apiv_l[:, iexit])
+
+                    _solve_with_conjugate_gradient(B_basis_l, C, out=Y_n_buf_l)
+                    Y_l[:n].copy_(Y_n_buf_l)
+                    _solve_with_conjugate_gradient(B_basis_l, bpiv_l[:n], trans=True, out=X_l)
+
+                _compute_slack_inplace(apiv_l, bpiv_l, X_l, S_l)
+                if torch.all(S_l >= -eps):
+                    state["B_inv"] = B_inv_l
+                    state["LU"] = LU_l
+                    state["pivots"] = piv_l
+                    state["B_basis"] = B_basis_l
+                    state["iters_since_refactor"] = iters_since_ref
+                    return "optimal"
+
+            state["B_inv"] = B_inv_l
+            state["LU"] = LU_l
+            state["pivots"] = piv_l
+            state["B_basis"] = B_basis_l
+            state["iters_since_refactor"] = iters_since_ref
+            return "continue"
+
+        if stream is not None:
+            with torch.cuda.stream(stream):
+                status = _body()
+            stream.synchronize()
+        else:
+            status = _body()
+
+        obj = float(torch.dot(C, state["X"]).item())
+        return status, state, obj
+
     print("Starting dual simplex iterations...")
     start_time = time.time()
-    
+
+    # If pivoting_strategies is set, race them in blocks and pick the best at reconvene points.
+    if pivoting_strategies is not None:
+        if reconvene_interval <= 0:
+            raise ValueError("reconvene_interval must be > 0 when pivoting_strategies is used.")
+
+        # canonical starting state (must be cloned per thread)
+        base_state = {
+            "apiv": apiv,
+            "bpiv": bpiv,
+            "jpiv": jpiv,
+            "X": X,
+            "Y": Y,
+            "S": S,
+            "B_inv": B_inv if SOLVER == "pinv" else None,
+            "LU": LU if SOLVER == "lu" else None,
+            "pivots": pivots if SOLVER == "lu" else None,
+            "B_basis": B_basis if SOLVER == "cg" else None,
+            "iters_since_refactor": iters_since_refactor,
+        }
+
+        def _clone_state(st: dict) -> dict:
+            out = {}
+            for k, v in st.items():
+                if isinstance(v, torch.Tensor):
+                    out[k] = v.clone()
+                else:
+                    out[k] = v
+            return out
+
+        done_iters = 0
+        while done_iters < ibudget:
+            block = min(reconvene_interval, ibudget - done_iters)
+
+            s0 = _clone_state(base_state)
+            s1 = _clone_state(base_state)
+            r0, r1 = pivoting_strategies
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                f0 = ex.submit(_run_block, r0, s0, block)
+                f1 = ex.submit(_run_block, r1, s1, block)
+                status0, st0, obj0 = f0.result()
+                status1, st1, obj1 = f1.result()
+
+            # If either found optimal, prefer optimal (if both optimal choose by objective)
+            candidates = []
+            if status0 != "unbounded":
+                candidates.append((status0, st0, obj0, r0))
+            if status1 != "unbounded":
+                candidates.append((status1, st1, obj1, r1))
+            if not candidates:
+                raise DualSimplexError(1)
+
+            # Prefer optimal status, otherwise pick best objective
+            optimal = [c for c in candidates if c[0] == "optimal"]
+            if optimal:
+                pick = max(optimal, key=lambda t: t[2]) if maximize else min(optimal, key=lambda t: t[2])
+            else:
+                pick = max(candidates, key=lambda t: t[2]) if maximize else min(candidates, key=lambda t: t[2])
+
+            status_pick, base_state, obj_pick, picked_rule = pick
+
+            # “recompute the basis” at reconvene: full refactor + consistent X,Y then refresh slack
+            try:
+                B_inv_new, LU_new, piv_new, B_basis_new = _refactor_and_resolve(
+                    base_state["apiv"], base_state["bpiv"], C, base_state["X"], base_state["Y"]
+                )
+            except RuntimeError:
+                raise DualSimplexError(41)
+
+            base_state["B_inv"] = B_inv_new
+            base_state["LU"] = LU_new
+            base_state["pivots"] = piv_new
+            base_state["B_basis"] = B_basis_new
+            base_state["iters_since_refactor"] = 0
+
+            _compute_slack_inplace(base_state["apiv"], base_state["bpiv"], base_state["X"], base_state["S"])
+
+            done_iters += block
+            if LOG_FREQ > 0:
+                print(
+                    f"[race] iters={done_iters} picked={picked_rule} obj={obj_pick:.6f} "
+                    f"elapsed={time.time() - start_time:.2f}s"
+                )
+
+            if torch.all(base_state["S"] >= -eps):
+                Y_out = torch.zeros(m, device=DEVICE, dtype=DTYPE)
+                Y_out.scatter_(0, base_state["jpiv"], base_state["Y"])
+                obasis = base_state["jpiv"][:n].clone() if return_basis else None
+                print(f"Dual simplex completed in {done_iters} iterations, time elapsed = {time.time() - start_time:.2f} seconds")
+                return base_state["X"], Y_out, 0, obasis
+
+        raise DualSimplexError(40)
+
+    # ...existing single-strategy for-loop remains unchanged below...
     for iteration in range(ibudget):
         # Choose pivot rule based on improvement
 

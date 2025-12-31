@@ -23,9 +23,9 @@ from dualsimplex import (
 if torch.cuda.is_available():
     DEVICE_STR = "cuda"
     print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
-elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-    DEVICE_STR = "mps"
-    print("Using Apple MPS device")
+# elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+#     DEVICE_STR = "mps"
+#     print("Using Apple MPS device")
 else:
     DEVICE_STR = "cpu"
     print("Using CPU device")

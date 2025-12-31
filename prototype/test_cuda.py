@@ -20,14 +20,14 @@ from dualsimplex import (
     DEVICE, DTYPE
 )
 
-DEVICE_STR = "cuda"
+DEVICE_STR = "cpu"
 # print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
 
 set_device(DEVICE_STR)
 print(f"Device set to: {get_device()}\n")
 
-N_VARS = 200
-N_CONSTRAINTS = 400
+N_VARS = 200 * 4
+N_CONSTRAINTS = 400 * 3
 
 PROFILE = False
 
