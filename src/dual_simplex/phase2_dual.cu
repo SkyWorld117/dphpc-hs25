@@ -62,7 +62,7 @@ fill_basis_csr_kernel(i_t m, const i_t *__restrict__ A_col_start, const i_t *__r
 template <typename i_t, typename f_t>
 void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_ind,
                            const f_t *d_A_values, const i_t *d_basic_list, i_t *&d_B_row_ptr,
-                           i_t *&d_B_col_ind, f_t *&d_B_values, i_t *nz_B) {
+                           i_t *&d_B_col_ind, f_t *&d_B_values, i_t &nz_B) {
     // 1. Allocate and compute row counts
     // Initialize row counts to 0
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_row_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_B_row_ptr");
@@ -87,7 +87,7 @@ void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_i
     i_t total_nz;
     CUDA_CALL_AND_CHECK(cudaMemcpy(&total_nz, d_B_row_ptr + m, sizeof(i_t), cudaMemcpyDeviceToHost),
                         "cudaMemcpy total_nz");
-    *nz_B = total_nz;
+    nz_B = total_nz;
 
     // 3. Allocate B column indices and values
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_col_ind, total_nz * sizeof(i_t)), "cudaMalloc d_B_col_ind");
@@ -160,7 +160,7 @@ template <typename i_t, typename f_t>
 void build_basis_transpose_on_device(
     i_t m, const i_t *d_A_col_start,
     const i_t *d_A_row_ind, const f_t *d_A_values, const i_t *d_basic_list,
-    i_t *&d_Bt_row_ptr, i_t *&d_Bt_col_ind, f_t *&d_Bt_values
+    i_t *&d_Bt_row_ptr, i_t *&d_Bt_col_ind, f_t *&d_Bt_values, i_t &nz_Bt
 ) {
     // 1. Allocate and compute column counts for B_T
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_row_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_Bt_row_ptr");
@@ -184,6 +184,7 @@ void build_basis_transpose_on_device(
     i_t total_nz;
     CUDA_CALL_AND_CHECK(cudaMemcpy(&total_nz, d_Bt_row_ptr + m, sizeof(i_t), cudaMemcpyDeviceToHost),
                         "cudaMemcpy total_nz for B_T");
+    nz_Bt = total_nz;
 
     // 3. Allocate B_T column indices and values
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_col_ind, total_nz * sizeof(i_t)), "cudaMalloc d_Bt_col_ind");
@@ -274,220 +275,50 @@ template <typename i_t, typename f_t>
 i_t compute_inverse(
     i_t m,
     i_t n,
-    const csc_matrix_t<i_t, f_t>& A,
+    const i_t *d_A_col_ptr,
+    const i_t *d_A_row_ind,
+    const f_t *d_A_values,
     const std::vector<i_t>& basic_list,
     f_t*& d_X
 ) {
+    // Move basic list to device
+    // TODO: Consider to keep basic list on device
+    i_t *d_basic_list;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_basic_list, m * sizeof(i_t)), "cudaMalloc d_basic_list");
+    CUDA_CALL_AND_CHECK(
+        cudaMemcpy(d_basic_list, basic_list.data(), m * sizeof(i_t), cudaMemcpyHostToDevice),
+        "cudaMemcpy d_basic_list");
+
     // Assemble B in CSR format
-    csr_matrix_t<i_t, f_t> B_csr;
-    B_csr.m = m;
-    B_csr.n = m;
-    B_csr.nz_max = 0;
-    B_csr.row_start.resize(m + 1, 0);
-
-    std::vector<i_t> elements_per_row(m);
-    for (i_t col_idx = 0; col_idx < m; ++col_idx) {
-        i_t j = basic_list[col_idx];
-        for (i_t idx = A.col_start[j]; idx < A.col_start[j + 1]; ++idx) {
-            i_t row = A.i[idx];
-            elements_per_row[row]++;
-        }
-    }
-    for (i_t row = 0; row < m; ++row) {
-        B_csr.row_start[row + 1] = B_csr.row_start[row] + elements_per_row[row];
-        B_csr.nz_max += elements_per_row[row];
-    }
-    B_csr.j.resize(B_csr.nz_max);
-    B_csr.x.resize(B_csr.nz_max);
-    std::vector<i_t> current_position_in_row(m);
-    for (i_t col_idx = 0; col_idx < m; ++col_idx) {
-        i_t j = basic_list[col_idx];
-        for (i_t idx = A.col_start[j]; idx < A.col_start[j + 1]; ++idx) {
-            i_t row = A.i[idx];
-            i_t dest_pos = B_csr.row_start[row] + current_position_in_row[row];
-            B_csr.j[dest_pos] = col_idx;
-            B_csr.x[dest_pos] = A.x[idx];
-            current_position_in_row[row]++;
-        }
-    }
-
-    // Assemble B_T in CSR format
-    // We construct B_T directly by considering the columns of A as rows of B_T
-    csr_matrix_t<i_t, f_t> B_t_csr;
-    B_t_csr.m = m;
-    B_t_csr.n = m;
-    B_t_csr.nz_max = 0;
-    B_t_csr.row_start.resize(m + 1, 0);
-
-    std::vector<i_t> elements_per_col(m);
-    for (i_t col_idx = 0; col_idx < m; ++col_idx) {
-        i_t j = basic_list[col_idx];
-        elements_per_col[col_idx] = A.col_start[j + 1] - A.col_start[j];
-    }
-    for (i_t row = 0; row < m; ++row) {
-        B_t_csr.row_start[row + 1] = B_t_csr.row_start[row] + elements_per_col[row];
-        B_t_csr.nz_max += elements_per_col[row];
-    }
-    B_t_csr.j.resize(B_t_csr.nz_max);
-    B_t_csr.x.resize(B_t_csr.nz_max);
-    for (i_t col_idx = 0; col_idx < m; ++col_idx) {
-        i_t j = basic_list[col_idx];
-        for (i_t idx = A.col_start[j]; idx < A.col_start[j + 1]; ++idx) {
-            i_t row = col_idx;
-            i_t dest_pos = B_t_csr.row_start[row] + (idx - A.col_start[j]);
-            B_t_csr.j[dest_pos] = A.i[idx];
-            B_t_csr.x[dest_pos] = A.x[idx];
-        }
-    }
-
-    // Move B to device
     i_t* d_B_row_ptr;
     i_t* d_B_col_ind;
     f_t* d_B_values;
+    i_t nz_B;
 
-    // // Debug comparison starts here
-    // i_t *d_A_col_ptr = nullptr;
-    // i_t *d_A_row_ind = nullptr;
-    // f_t *d_A_values = nullptr;
-    // phase2_cu::move_A_to_device<i_t, f_t>(A, d_A_col_ptr, d_A_row_ind, d_A_values);
+    phase2_cu::build_basis_on_device<i_t, f_t>(
+        m, d_A_col_ptr, d_A_row_ind, d_A_values,
+        d_basic_list, d_B_row_ptr, d_B_col_ind, d_B_values, nz_B
+    );
 
-    // i_t *d_basic_list;
-    // CUDA_CALL_AND_CHECK(cudaMalloc(&d_basic_list, m * sizeof(i_t)), "cudaMalloc d_basic_list");
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(d_basic_list, basic_list.data(), m * sizeof(i_t), cudaMemcpyHostToDevice),
-    //     "cudaMemcpy d_basic_list");
-
-    // i_t nz_B;
-    // phase2_cu::build_basis_on_device<i_t, f_t>(m, d_A_col_ptr, d_A_row_ind, d_A_values,
-    //                                            d_basic_list, d_B_row_ptr, d_B_col_ind, d_B_values,
-    //                                            &nz_B);
-
-    // // Debug: Move B back to host and verify correctness
-    // std::vector<i_t> B_row_ptr_host(m + 1);
-    // std::vector<i_t> B_col_ind_host(nz_B);
-    // std::vector<f_t> B_values_host(nz_B);
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(B_row_ptr_host.data(), d_B_row_ptr, (m + 1) * sizeof(i_t), cudaMemcpyDeviceToHost),
-    //     "cudaMemcpy B_row_ptr_host");
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(B_col_ind_host.data(), d_B_col_ind, nz_B * sizeof(i_t), cudaMemcpyDeviceToHost),
-    //     "cudaMemcpy B_col_ind_host");
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(B_values_host.data(), d_B_values, nz_B * sizeof(f_t), cudaMemcpyDeviceToHost),
-    //     "cudaMemcpy B_values_host");
-    // // Create dense B
-    // std::vector<std::vector<f_t>> B_dense_host(m, std::vector<f_t>(m, 0.0));
-    // for (i_t row = 0; row < m; ++row) {
-    //     for (i_t idx = B_row_ptr_host[row]; idx < B_row_ptr_host[row + 1]; ++idx) {
-    //         i_t col = B_col_ind_host[idx];
-    //         f_t val = B_values_host[idx];
-    //         B_dense_host[row][col] = val;
-    //     }
-    // }
-    // // Create cpu dense B from B_csr
-    // std::vector<std::vector<f_t>> B_dense_cpu(m, std::vector<f_t>(m, 0.0));
-    // for (i_t row = 0; row < m; ++row) {
-    //     for (i_t idx = B_csr.row_start[row]; idx < B_csr.row_start[row + 1]; ++idx) {
-    //         i_t col = B_csr.j[idx];
-    //         f_t val = B_csr.x[idx];
-    //         B_dense_cpu[row][col] = val;
-    //     }
-    // }
-    // // Compare B_dense_host and B_dense_cpu
-    // i_t mismatch_count = 0;
-    // for (i_t row = 0; row < m; ++row) {
-    //     for (i_t col = 0; col < m; ++col) {
-    //         f_t val_host = B_dense_host[row][col];
-    //         f_t val_cpu = B_dense_cpu[row][col];
-    //         if (std::abs(val_host - val_cpu) > 1e-8) {
-    //             printf("Mismatch in B at (%d, %d): host %f vs cpu %f\n", row, col, val_host, val_cpu);
-    //             mismatch_count++;
-    //         }
-    //     }
-    // }
-    // // Debug comparison ends here
-
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_row_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_B_row_ptr");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_col_ind, B_csr.nz_max * sizeof(i_t)), "cudaMalloc d_B_col_ind");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_values, B_csr.nz_max * sizeof(f_t)), "cudaMalloc d_B_values");
-
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_B_row_ptr, B_csr.row_start.data(), (m + 1) * sizeof(i_t), cudaMemcpyHostToDevice), "cudaMemcpy d_B_row_ptr");
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_B_col_ind, B_csr.j.data(), B_csr.nz_max * sizeof(i_t), cudaMemcpyHostToDevice), "cudaMemcpy d_B_col_ind");
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_B_values, B_csr.x.data(), B_csr.nz_max * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_B_values");
-
-    // Move B_T to device
+    // Assemble B_T in CSR format
+    // We construct B_T directly by considering the columns of A as rows of B_T
     i_t* d_Bt_row_ptr;
     i_t* d_Bt_col_ind;
     f_t* d_Bt_values;
+    i_t nz_Bt;
 
-    // // Debug comparison starts here
-    // i_t *d_A_col_ptr = nullptr;
-    // i_t *d_A_row_ind = nullptr;
-    // f_t *d_A_values = nullptr;
-    // phase2_cu::move_A_to_device<i_t, f_t>(A, d_A_col_ptr, d_A_row_ind, d_A_values);
+    phase2_cu::build_basis_transpose_on_device<i_t, f_t>(
+        m, d_A_col_ptr, d_A_row_ind, d_A_values,
+        d_basic_list, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, nz_Bt
+    );
 
-    // i_t *d_basic_list;
-    // CUDA_CALL_AND_CHECK(cudaMalloc(&d_basic_list, m * sizeof(i_t)), "cudaMalloc d_basic_list");
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(d_basic_list, basic_list.data(), m * sizeof(i_t), cudaMemcpyHostToDevice),
-    //     "cudaMemcpy d_basic_list");
-    // phase2_cu::build_basis_transpose_on_device<i_t, f_t>(
-    //     m, d_A_col_ptr, d_A_row_ind, d_A_values,
-    //     d_basic_list, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values
-    // );
+    // Assemble B_T in dense format
+    f_t* d_Bt_dense;
 
-    // // Debug: Move B_T back to host and verify correctness
-    // std::vector<i_t> Bt_row_ptr_host(m + 1);
-    // std::vector<i_t> Bt_col_ind_host(B_t_csr.nz_max);
-    // std::vector<f_t> Bt_values_host(B_t_csr.nz_max);
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(Bt_row_ptr_host.data(), d_Bt_row_ptr, (m + 1) * sizeof(i_t), cudaMemcpyDeviceToHost),
-    //     "cudaMemcpy Bt_row_ptr_host");
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(Bt_col_ind_host.data(), d_Bt_col_ind, B_t_csr.nz_max * sizeof(i_t), cudaMemcpyDeviceToHost),
-    //     "cudaMemcpy Bt_col_ind_host");
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(Bt_values_host.data(), d_Bt_values, B_t_csr.nz_max * sizeof(f_t), cudaMemcpyDeviceToHost),
-    //     "cudaMemcpy Bt_values_host");
-    // // Create dense B_T
-    // std::vector<std::vector<f_t>> Bt_dense_host_(m, std::vector<f_t>(m, 0.0));
-    // for (i_t row = 0; row < m; ++row) {
-    //     for (i_t idx = Bt_row_ptr_host[row]; idx < Bt_row_ptr_host[row + 1]; ++idx) {
-    //         i_t col = Bt_col_ind_host[idx];
-    //         f_t val = Bt_values_host[idx];
-    //         Bt_dense_host_[row][col] = val;
-    //     }
-    // }
-    // // Create cpu dense B_T from B_t_csr
-    // std::vector<std::vector<f_t>> Bt_dense_cpu(m, std::vector<f_t>(m, 0.0));
-    // for (i_t row = 0; row < m; ++row) {
-    //     for (i_t idx = B_t_csr.row_start[row]; idx < B_t_csr.row_start[row + 1]; ++idx) {
-    //         i_t col = B_t_csr.j[idx];
-    //         f_t val = B_t_csr.x[idx];
-    //         Bt_dense_cpu[row][col] = val;
-    //     }
-    // }
-    // // Compare Bt_dense_host and Bt_dense_cpu
-    // i_t mismatch_count = 0;
-    // for (i_t row = 0; row < m; ++row) {
-    //     for (i_t col = 0; col < m; ++col) {
-    //         f_t val_host = Bt_dense_host_[row][col];
-    //         f_t val_cpu = Bt_dense_cpu[row][col];
-    //         if (std::abs(val_host - val_cpu) > 1e-8) {
-    //             printf("Mismatch in B_T at (%d, %d): host %f vs cpu %f\n", row, col, val_host, val_cpu);
-    //             mismatch_count++;
-    //         }
-    //     }
-    // }
-    // // Debug comparison ends here
-
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_row_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_Bt_row_ptr");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_col_ind, B_t_csr.nz_max * sizeof(i_t)), "cudaMalloc d_Bt_col_ind");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_values, B_t_csr.nz_max * sizeof(f_t)), "cudaMalloc d_Bt_values");
-
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_Bt_row_ptr, B_t_csr.row_start.data(), (m + 1) * sizeof(i_t), cudaMemcpyHostToDevice), "cudaMemcpy d_Bt_row_ptr");
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_Bt_col_ind, B_t_csr.j.data(), B_t_csr.nz_max * sizeof(i_t), cudaMemcpyHostToDevice), "cudaMemcpy d_Bt_col_ind");
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_Bt_values, B_t_csr.x.data(), B_t_csr.nz_max * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_Bt_values");
+    phase2_cu::build_basis_transpose_on_device_dense(
+        m, d_A_col_ptr, d_A_row_ind, d_A_values, 
+        d_basic_list, d_Bt_dense
+    );
 
     // Compute (B^T B) with cuSPARSE
     cusparseHandle_t cusparse_handle;
@@ -501,7 +332,7 @@ i_t compute_inverse(
         &d_B_matrix,
         m,
         m,
-        B_csr.nz_max,
+        nz_B,
         d_B_row_ptr,
         d_B_col_ind,
         d_B_values,
@@ -514,7 +345,7 @@ i_t compute_inverse(
         &d_Bt_matrix,
         m,
         m,
-        B_t_csr.nz_max,
+        nz_Bt,
         d_Bt_row_ptr,
         d_Bt_col_ind,
         d_Bt_values,
@@ -679,58 +510,6 @@ i_t compute_inverse(
         CUDSS_BASE_ZERO
     ), dss_status, "cudssMatrixCreateCsr for B");
 
-    // Convert B^T from sparse CSR to dense format for RHS (column-major)
-    f_t* d_Bt_dense;
-
-    // // Debug starts here
-    // i_t *d_A_col_ptr = nullptr;
-    // i_t *d_A_row_ind = nullptr;
-    // f_t *d_A_values = nullptr;
-    // phase2_cu::move_A_to_device<i_t, f_t>(A, d_A_col_ptr, d_A_row_ind, d_A_values);
-
-    // i_t *d_basic_list;
-    // CUDA_CALL_AND_CHECK(cudaMalloc(&d_basic_list, m * sizeof(i_t)), "cudaMalloc d_basic_list");
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(d_basic_list, basic_list.data(), m * sizeof(i_t), cudaMemcpyHostToDevice),
-    //     "cudaMemcpy d_basic_list");
-
-    // phase2_cu::build_basis_transpose_on_device_dense(m, d_A_col_ptr, d_A_row_ind, d_A_values, d_basic_list, d_Bt_dense);
-
-    // // Debug: Move B_T back to host and verify correctness
-    // std::vector<f_t> Bt_dense_host_debug(m * m);
-    // CUDA_CALL_AND_CHECK(
-    //     cudaMemcpy(Bt_dense_host_debug.data(), d_Bt_dense, m * m * sizeof(f_t), cudaMemcpyDeviceToHost),
-    //     "cudaMemcpy Bt_dense_host_debug");
-
-    // Convert CSR to dense in column-major format
-    std::vector<f_t> Bt_dense_host(m * m, 0.0);
-    for (i_t row = 0; row < m; ++row) {
-        for (i_t idx = B_t_csr.row_start[row]; idx < B_t_csr.row_start[row + 1]; ++idx) {
-            i_t col = B_t_csr.j[idx];
-            // Column-major: element (row, col) is at index col * m + row
-            Bt_dense_host[col * m + row] = B_t_csr.x[idx];
-        }
-    }
-
-    // // Debug comparison
-    // i_t mismatch_count = 0;
-    // for (i_t row = 0; row < m; ++row) {
-    //     for (i_t col = 0; col < m; ++col) {
-    //         f_t val_host = Bt_dense_host[col * m + row];
-    //         f_t val_debug = Bt_dense_host_debug[col * m + row];
-    //         if (std::abs(val_host - val_debug) > 1e-8) {
-    //             printf("Mismatch in dense B_T at (%d, %d): host %f vs debug %f\n", row, col, val_host, val_debug);
-    //             mismatch_count++;
-    //         }
-    //     }
-    // }
-    // // Debug ends here
-
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_dense, m * m * sizeof(f_t)), "cudaMalloc d_Bt_dense");
-    CUDA_CALL_AND_CHECK(cudaMemset(d_Bt_dense, 0, m * m * sizeof(f_t)), "cudaMemset d_Bt_dense");
-
-    CUDA_CALL_AND_CHECK(cudaMemcpy(d_Bt_dense, Bt_dense_host.data(), m * m * sizeof(f_t), cudaMemcpyHostToDevice), "cudaMemcpy d_Bt_dense");
-    
     cudssMatrix_t d_Bt_matrix_cudss;
     CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(
         &d_Bt_matrix_cudss,
@@ -791,7 +570,15 @@ i_t compute_inverse(
     CUDSS_CALL_AND_CHECK(cudssConfigDestroy(solverConfig), dss_status, "cudssConfigDestroy B");
     CUDSS_CALL_AND_CHECK(cudssDestroy(dss_handle), dss_status, "cudssDestroyHandle B");
 
+    CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
+    CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
+    CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
+    CUDA_CALL_AND_CHECK(cudaFree(d_Bt_row_ptr), "cudaFree d_Bt_row_ptr");
+    CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
+    CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
     CUDA_CALL_AND_CHECK(cudaFree(d_Bt_dense), "cudaFree d_Bt_dense");
+
+    CUDA_CALL_AND_CHECK(cudaFree(d_basic_list), "cudaFree d_basic_list");
     // Note: d_X is not freed here - caller will free it after use
 
     return 0;
@@ -837,13 +624,21 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     assert(superbasic_list.size() == 0);
     assert(nonbasic_list.size() == n - m);
 
+    // Move A to device
+    i_t* d_A_col_ptr;
+    i_t* d_A_row_ind;
+    f_t* d_A_values;
+    phase2_cu::move_A_to_device(lp.A, d_A_col_ptr, d_A_row_ind, d_A_values);
+
     // Compute Moore-Penrose pseudo-inverse of B
     f_t* d_B_pinv;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
     phase2_cu::compute_inverse<i_t, f_t>(
         m,
         n,
-        lp.A,
+        d_A_col_ptr,
+        d_A_row_ind,
+        d_A_values,
         basic_list,
         d_B_pinv
     );
@@ -1367,7 +1162,9 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             phase2_cu::compute_inverse<i_t, f_t>(
                 m,
                 n,
-                lp.A,
+                d_A_col_ptr,
+                d_A_row_ind,
+                d_A_values,
                 basic_list,
                 d_B_pinv
             );
