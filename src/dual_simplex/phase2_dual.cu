@@ -1113,10 +1113,12 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         bool should_refactor = (iter + 1) % settings.refactor_frequency == 0;
 
         if (!should_refactor) {
+            settings.timer.start("Inverse Update 1");
             should_refactor = !phase2_cu::eta_update_inverse(
                 cublas_handle, m, d_B_pinv, eta_b_old, eta_b_new, eta_v, eta_c, eta_d, d_A_col_ptr,
                 d_A_row_ind, d_A_values, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values,
                 basic_leaving_index, entering_index);
+            settings.timer.stop("Inverse Update 1");
         }
 
         // Free old B and Bt and recompute
@@ -1128,6 +1130,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
 
         if (!should_refactor) {
+            settings.timer.start("Inverse Update 2");
             // Move basic list to device
             // TODO: as above consider keeping this on device
             i_t *d_basic_list;
@@ -1151,9 +1154,11 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                                 "cudaDeviceSynchronize after build B and Bt");
             CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream1), "cudaStreamDestroy stream1");
             CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream2), "cudaStreamDestroy stream2");
+            settings.timer.stop("Inverse Update 2");
         }
 
         if (should_refactor) {
+            settings.timer.start("Inverse Refactorizaton");
             // Recompute d_B_pinv
             phase2_cu::compute_inverse<i_t, f_t>(
                 m, n, d_A_col_ptr, d_A_row_ind, d_A_values, d_B_row_ptr, d_B_col_ind, d_B_values,
@@ -1162,6 +1167,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             phase2::reset_basis_mark(basic_list, nonbasic_list, basic_mark, nonbasic_mark);
             phase2::compute_initial_primal_infeasibilities(
                 lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
+            settings.timer.stop("Inverse Refactorizaton");
         }
         timers.lu_update_time += timers.stop_timer();
 
