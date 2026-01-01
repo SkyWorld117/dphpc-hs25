@@ -278,14 +278,36 @@ void move_A_to_device(const csc_matrix_t<i_t, f_t> &A, i_t *&d_A_col_ptr, i_t *&
 }
 
 template <typename i_t, typename f_t>
+void build_basis_and_basis_transpose_on_device(
+    i_t m, const i_t *d_A_col_ptr, const i_t *d_A_row_ind,
+    const f_t *d_A_values, const i_t *d_basic_list,
+    i_t *&d_B_row_ptr, i_t *&d_B_col_ind, f_t *&d_B_values,
+    i_t *&d_Bt_row_ptr, i_t *&d_Bt_col_ind, f_t *&d_Bt_values,
+    i_t &nz_B, i_t &nz_Bt, cudaStream_t stream1, cudaStream_t stream2
+) {
+    // Build B
+    phase2_cu::build_basis_on_device<i_t, f_t>(
+        m, d_A_col_ptr, d_A_row_ind, d_A_values,
+        d_basic_list, d_B_row_ptr, d_B_col_ind, d_B_values, nz_B,
+        stream1
+    );
+
+    // Build B_T
+    phase2_cu::build_basis_transpose_on_device<i_t, f_t>(
+        m, d_A_col_ptr, d_A_row_ind, d_A_values,
+        d_basic_list, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, nz_Bt,
+        stream2
+    );
+}
+
+template <typename i_t, typename f_t>
 i_t compute_inverse(
-    i_t m,
-    i_t n,
-    const i_t *d_A_col_ptr,
-    const i_t *d_A_row_ind,
-    const f_t *d_A_values,
+    i_t m, i_t n,
+    const i_t *d_A_col_ptr, const i_t *d_A_row_ind, const f_t *d_A_values,
+    i_t *&d_B_row_ptr, i_t *&d_B_col_ind, f_t *&d_B_values,
+    i_t *&d_Bt_row_ptr, i_t *&d_Bt_col_ind, f_t *&d_Bt_values,
     const std::vector<i_t>& basic_list,
-    f_t*& d_X
+    f_t*& d_X, i_t& nz_B, i_t& nz_Bt
 ) {
     // Move basic list to device
     // TODO: Consider to keep basic list on device
@@ -301,29 +323,14 @@ i_t compute_inverse(
     CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream2), "cudaStreamCreate stream2 (B_T)");
     CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream3), "cudaStreamCreate stream3 (B_T dense)");
 
-    // Assemble B in CSR format
-    i_t* d_B_row_ptr;
-    i_t* d_B_col_ind;
-    f_t* d_B_values;
-    i_t nz_B;
-
-    phase2_cu::build_basis_on_device<i_t, f_t>(
+    // Assemble B and B_T in CSR format
+    phase2_cu::build_basis_and_basis_transpose_on_device<i_t, f_t>(
         m, d_A_col_ptr, d_A_row_ind, d_A_values,
-        d_basic_list, d_B_row_ptr, d_B_col_ind, d_B_values, nz_B,
-        stream1
-    );
-
-    // Assemble B_T in CSR format
-    // We construct B_T directly by considering the columns of A as rows of B_T
-    i_t* d_Bt_row_ptr;
-    i_t* d_Bt_col_ind;
-    f_t* d_Bt_values;
-    i_t nz_Bt;
-
-    phase2_cu::build_basis_transpose_on_device<i_t, f_t>(
-        m, d_A_col_ptr, d_A_row_ind, d_A_values,
-        d_basic_list, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, nz_Bt,
-        stream2
+        d_basic_list,
+        d_B_row_ptr, d_B_col_ind, d_B_values,
+        d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values,
+        nz_B, nz_Bt,
+        stream1, stream2
     );
 
     // Assemble B_T in dense format
@@ -588,12 +595,12 @@ i_t compute_inverse(
     CUDSS_CALL_AND_CHECK(cudssConfigDestroy(solverConfig), dss_status, "cudssConfigDestroy B");
     CUDSS_CALL_AND_CHECK(cudssDestroy(dss_handle), dss_status, "cudssDestroyHandle B");
 
-    CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
-    CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
-    CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
-    CUDA_CALL_AND_CHECK(cudaFree(d_Bt_row_ptr), "cudaFree d_Bt_row_ptr");
-    CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
-    CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
+    // CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
+    // CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
+    // CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
+    // CUDA_CALL_AND_CHECK(cudaFree(d_Bt_row_ptr), "cudaFree d_Bt_row_ptr");
+    // CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
+    // CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
     CUDA_CALL_AND_CHECK(cudaFree(d_Bt_dense), "cudaFree d_Bt_dense");
     CUDA_CALL_AND_CHECK(cudaFree(d_BtB_row_ptr), "cudaFree d_BtB_row_ptr");
     CUDA_CALL_AND_CHECK(cudaFree(d_BtB_col_ind), "cudaFree d_BtB_col_ind");
@@ -604,8 +611,48 @@ i_t compute_inverse(
 
     CUDA_CALL_AND_CHECK(cudaFree(d_basic_list), "cudaFree d_basic_list");
     // Note: d_X is not freed here - caller will free it after use
+    // d_B and d_Bt are freed after inverse update later
 
     return 0;
+}
+
+// template <typename i_t, typename f_t>
+// void fetch_col_as_dense(
+//     i_t m, i_t 
+
+template <typename i_t, typename f_t>
+void eta_update_inverse(i_t m, i_t eta_col_idx, i_t entering_idx, f_t *d_B_pinv) {
+    // Input:
+    //     B_pinv (m×m)
+    //     B      (m×m)
+    //     j      (column index)
+    //     b_new  (new column)
+
+    // # --- Remove old column ---
+    // b_old = B[:, j]
+    // p = B_pinv @ b_old
+
+    // if abs(p[j]) < tol:
+    //     RECOMPUTE via SVD   # unavoidable degeneracy
+
+    // B_pinv = B_pinv - (p @ p.T) / p[j]
+    // delete row j from B_pinv
+    // delete column j from B
+
+    // # --- Insert new column ---
+    // v = B_pinv @ b_new
+    // c = b_new - B @ v
+
+    // if norm(c) > tol:
+    //     d = c / (c.T @ c)
+    //     B_pinv = B_pinv - v @ d.T
+    //     insert row j: d.T
+    // else:
+    //     beta = 1 / (1 + v.T @ v)
+    //     B_pinv = B_pinv - beta * (v @ v.T) @ B_pinv
+    //     insert row j: beta * v.T
+
+    // insert column j: b_new into B
 }
 
 } // namespace phase2_cu
@@ -649,22 +696,21 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     assert(nonbasic_list.size() == n - m);
 
     // Move A to device
-    i_t* d_A_col_ptr;
-    i_t* d_A_row_ind;
-    f_t* d_A_values;
+    i_t* d_A_col_ptr; i_t* d_A_row_ind; f_t* d_A_values;
     phase2_cu::move_A_to_device(lp.A, d_A_col_ptr, d_A_row_ind, d_A_values);
 
     // Compute Moore-Penrose pseudo-inverse of B
+    i_t* d_B_row_ptr;  i_t* d_B_col_ind;  f_t* d_B_values;  i_t nz_B;
+    i_t* d_Bt_row_ptr; i_t* d_Bt_col_ind; f_t* d_Bt_values; i_t nz_Bt;
     f_t* d_B_pinv;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
     phase2_cu::compute_inverse<i_t, f_t>(
-        m,
-        n,
-        d_A_col_ptr,
-        d_A_row_ind,
-        d_A_values,
+        m, n,
+        d_A_col_ptr, d_A_row_ind, d_A_values,
+        d_B_row_ptr, d_B_col_ind, d_B_values,
+        d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values,
         basic_list,
-        d_B_pinv
+        d_B_pinv, nz_B, nz_Bt
     );
 
     if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
@@ -1174,23 +1220,73 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
 
         timers.start_timer();
         // Refactor or update the basis factorization
+
+        // Criteria:
+        // 1. Iteration count
+        // 2. Numerical stability
+        //    b_old = B[:, j] = Bt[j, :]
+        //    p = B_pinv @ b_old
+        //    if abs(p[j]) < tol: RECOMPUTE via SVD
+        // bool should_refactor = iter % settings.refactor_frequency == 0;
         bool should_refactor = true;
         if (!should_refactor) {
-            // i_t recommend_refactor = ft.update(utilde_sparse, UTsol_sparse, basic_leaving_index);
-            // should_refactor = recommend_refactor == 1;
             // TODO: eta updates
+            phase2_cu::eta_update_inverse<i_t, f_t>(m, basic_leaving_index, entering_index, d_B_pinv);
+
+            // Free old B and Bt and recompute
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_row_ptr), "cudaFree d_Bt_row_ptr");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
+
+            cudaStream_t stream1, stream2;
+            CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream1), "cudaStreamCreate stream1");
+            CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream2), "cudaStreamCreate stream2");
+
+            // Move basic list to device
+            // TODO: as above consider keeping this on device
+            i_t* d_basic_list;
+            CUDA_CALL_AND_CHECK(
+                cudaMalloc(&d_basic_list, m * sizeof(i_t)), "cudaMalloc d_basic_list");
+            CUDA_CALL_AND_CHECK(
+                cudaMemcpy(d_basic_list, basic_list.data(), m * sizeof(i_t), cudaMemcpyHostToDevice),
+                "cudaMemcpy to d_basic_list");
+
+            // TODO: It's probably not smart to rebuild B and Bt from scratch every time
+            // Instead use a 95% threshold (or higher) to determine the size per row to 
+            // allocate s.t. we don't have to realloc every time
+            phase2_cu::build_basis_and_basis_transpose_on_device<i_t, f_t>(
+                m, d_A_col_ptr, d_A_row_ind, d_A_values,
+                d_basic_list,
+                d_B_row_ptr, d_B_col_ind, d_B_values,
+                d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values,
+                nz_B, nz_Bt,
+                stream1, stream2
+            );
+
+            CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(), "cudaDeviceSynchronize after build B and Bt");
+            CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream1), "cudaStreamDestroy stream1");
+            CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream2), "cudaStreamDestroy stream2");
         }
 
         if (should_refactor) {
+            // Free old B and Bt
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_row_ptr), "cudaFree d_Bt_row_ptr");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
             // Recompute d_B_pinv
             phase2_cu::compute_inverse<i_t, f_t>(
-                m,
-                n,
-                d_A_col_ptr,
-                d_A_row_ind,
-                d_A_values,
+                m, n,
+                d_A_col_ptr, d_A_row_ind, d_A_values,
+                d_B_row_ptr, d_B_col_ind, d_B_values,
+                d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values,
                 basic_list,
-                d_B_pinv
+                d_B_pinv, nz_B, nz_Bt
             );
 
             phase2::reset_basis_mark(basic_list, nonbasic_list, basic_mark, nonbasic_mark);
