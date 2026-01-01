@@ -3,7 +3,8 @@
 ## Yi
 - [x] implement using B_pinv as solver
 - [x] implement assembling B_T, B_T dense on device
-- [ ] eta updates for B_pinv
+- [x] eta updates for B_pinv
+- [ ] investigate better ways to store B, Bt and to compute BtB
 
 ## Sophia
 - [x] implement assembling B from A on device

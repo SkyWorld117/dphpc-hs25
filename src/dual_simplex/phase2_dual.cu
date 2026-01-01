@@ -2,6 +2,7 @@
 #include <cusparse.h>
 #include <driver_types.h>
 #include <dual_simplex/phase2_dual.cuh>
+#include <dual_simplex/problem_analysis.hpp>
 
 #include <thrust/device_vector.h>
 #include <thrust/scan.h>
@@ -679,6 +680,11 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     get_basis_from_vstatus(m, vstatus, basic_list, nonbasic_list, superbasic_list);
     assert(superbasic_list.size() == 0);
     assert(nonbasic_list.size() == n - m);
+
+    // Analyze matrix A
+    problem_analyzer_t<i_t, f_t> analyzer(lp, settings);
+    analyzer.analyze();
+    analyzer.display_analysis();
 
     // Move A to device
     i_t *d_A_col_ptr;
