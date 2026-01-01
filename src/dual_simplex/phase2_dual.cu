@@ -69,7 +69,6 @@ void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_i
                            i_t *&d_B_col_ind, f_t *&d_B_values, i_t &nz_B, cudaStream_t stream) {
     // 1. Allocate and compute row counts
     // Initialize row counts to 0
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_row_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_B_row_ptr");
     CUDA_CALL_AND_CHECK(cudaMemset(d_B_row_ptr, 0, (m + 1) * sizeof(i_t)),
                         "cudaMemset d_B_row_ptr");
     assert(d_B_row_ptr != nullptr);
@@ -93,7 +92,7 @@ void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_i
                         "cudaMemcpy total_nz");
     nz_B = total_nz;
 
-    // 3. Allocate B column indices and values
+    // 3. Allocate B column indices and values TODO: could we allocate a bigger buffer at start?
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_col_ind, total_nz * sizeof(i_t)), "cudaMalloc d_B_col_ind");
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_values, total_nz * sizeof(f_t)), "cudaMalloc d_B_values");
 
@@ -164,8 +163,6 @@ void build_basis_transpose_on_device(i_t m, const i_t *d_A_col_start, const i_t 
                                      i_t *&d_Bt_row_ptr, i_t *&d_Bt_col_ind, f_t *&d_Bt_values,
                                      i_t &nz_Bt, cudaStream_t stream) {
     // 1. Allocate and compute column counts for B_T
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_row_ptr, (m + 1) * sizeof(i_t)),
-                        "cudaMalloc d_Bt_row_ptr");
     CUDA_CALL_AND_CHECK(cudaMemset(d_Bt_row_ptr, 0, (m + 1) * sizeof(i_t)),
                         "cudaMemset d_Bt_row_ptr");
     assert(d_Bt_row_ptr != nullptr);
@@ -359,14 +356,16 @@ i_t compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_hand
                                       d_B_matrix, &beta, d_BtB_matrix, CUDA_R_64F,
                                       CUSPARSE_SPGEMM_DEFAULT, spgemm_desc, &buffer_size1, nullptr),
         "cusparseSpGEMM_workEstimation for B_T B");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_buffer1, buffer_size1), "cudaMalloc d_buffer1 for B_T B");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_buffer1, buffer_size1),
+                        "cudaMalloc d_buffer1 for B_T B"); // TODO: check if we can reuse buffer?
+                                                           // malloc one big one at start?
 
     CUSPARSE_CALL_AND_CHECK(cusparseSpGEMM_workEstimation(
                                 cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
                                 CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, d_Bt_matrix, d_B_matrix,
                                 &beta, d_BtB_matrix, CUDA_R_64F, CUSPARSE_SPGEMM_DEFAULT,
                                 spgemm_desc, &buffer_size1, d_buffer1),
-                            "cusparseSpGEMM_workEstimation for B_T B");
+                            "cusparseSpGEMM_workEstimation with alloced buffer for B_T B");
 
     CUSPARSE_CALL_AND_CHECK(
         cusparseSpGEMM_compute(cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
@@ -381,7 +380,7 @@ i_t compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_hand
                                CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, d_Bt_matrix, d_B_matrix,
                                &beta, d_BtB_matrix, CUDA_R_64F, CUSPARSE_SPGEMM_DEFAULT,
                                spgemm_desc, &buffer_size2, d_buffer2),
-        "cusparseSpGEMM_compute for B_T B");
+        "cusparseSpGEMM_compute with alloced buffer for B_T B");
 
     // Get the size of the result matrix AFTER compute
     int64_t rows_BtB, cols_BtB, nnz_BtB;
@@ -635,6 +634,122 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, f_t *d_B_pinv, f_t 
     return true; // Successful update
 }
 
+template <typename i_t, typename f_t>
+__global__ void denseMatrixSparseVectorMulKernel(i_t m, const f_t *__restrict__ b_inv,
+                                                 const i_t *__restrict__ sparse_vec_indices,
+                                                 const f_t *__restrict__ sparse_vec_values,
+                                                 i_t nz_sparse_vec, f_t *__restrict__ result) {
+    id_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= m)
+        return;
+
+    f_t sum = 0.0;
+    result[idx] = 0;
+    for (i_t k = 0; k < nz_sparse_vec; ++k) {
+        i_t mat_idx = sparse_vec_indices[k] * m + idx;
+        result[idx] += sparse_vec_values[k] * b_inv[mat_idx];
+    }
+}
+
+template <typename i_t, typename f_t>
+void pinv_solve(cublasHandle_t &cublas_handle, f_t *d_B_pinv, const std::vector<f_t> &rhs,
+                std::vector<f_t> &x, i_t m, bool transpose) {
+    std::cout << "pinv dense solve gpu\n" << std::endl;
+    // const f_t alpha = 1.0;
+    // const f_t beta = 0.0;
+    // cublasOperation_t op = transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
+    // CUBLAS_CALL_AND_CHECK(
+    //     cublasDgemv(cublas_handle, op, m, m, &alpha, d_B_pinv, m, d_rhs, 1, &beta, d_x, 1),
+    //     "cublasSgemv pinv_solve");
+    // fake indices and values for dense vector
+    std::vector<i_t> fake_indices(m);
+    for (i_t i = 0; i < m; ++i) {
+        fake_indices[i] = i;
+    }
+    i_t *d_rhs_indices;
+    f_t *d_rhs_values;
+    f_t *d_x;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_x, m * sizeof(f_t)), "cudaMalloc d_x");
+
+    // Copy sparse rhs to dense d_rhs
+    // std::vector<f_t> h_rhs_dense(m, 0.0);
+    const i_t nz_rhs = rhs.size();
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_rhs_indices, nz_rhs * sizeof(f_t)),
+                        "cudaMalloc d_rhs indices");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(d_rhs_indices, fake_indices.data(), nz_rhs * sizeof(i_t),
+                                   cudaMemcpyHostToDevice),
+                        "cudaMemcpy rhs indices to d_rhs_indices");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_rhs_values, nz_rhs * sizeof(f_t)), "cudaMalloc d_rhs values");
+    CUDA_CALL_AND_CHECK(
+        cudaMemcpy(d_rhs_values, rhs.data(), nz_rhs * sizeof(f_t), cudaMemcpyHostToDevice),
+        "cudaMemcpy rhs values to d_rhs");
+    int block_size = 256;
+    int grid_size = (m + block_size - 1) / block_size;
+    denseMatrixSparseVectorMulKernel<<<grid_size, block_size>>>(m, d_B_pinv, d_rhs_indices,
+                                                                d_rhs_values, m, d_x);
+    CUDA_CALL_AND_CHECK(cudaGetLastError(), "denseMatrixSparseVectorMulKernel");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(x.data(), d_x, m * sizeof(f_t), cudaMemcpyDeviceToHost),
+                        "cudaMemcpy d_x to x");
+    CUDA_CALL_AND_CHECK(cudaFree(d_rhs_indices), "cudaFree d_rhs indices");
+    CUDA_CALL_AND_CHECK(cudaFree(d_rhs_values), "cudaFree d_rhs values");
+    CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
+}
+
+template <typename i_t, typename f_t>
+void pinv_solve(cublasHandle_t &cublas_handle, f_t *d_B_pinv, const sparse_vector_t<i_t, f_t> &rhs,
+                sparse_vector_t<i_t, f_t> &x, i_t m, bool transpose) {
+    std::cout << "pinv solve gpu\n";
+    i_t *d_rhs_indices;
+    f_t *d_rhs_values;
+    f_t *d_x;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_x, m * sizeof(f_t)), "cudaMalloc d_x");
+
+    // Copy sparse rhs to dense d_rhs
+    // std::vector<f_t> h_rhs_dense(m, 0.0);
+    const i_t nz_rhs = rhs.i.size();
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_rhs_indices, nz_rhs * sizeof(f_t)),
+                        "cudaMalloc d_rhs indices");
+    CUDA_CALL_AND_CHECK(
+        cudaMemcpy(d_rhs_indices, rhs.i.data(), nz_rhs * sizeof(i_t), cudaMemcpyHostToDevice),
+        "cudaMemcpy rhs indices to d_rhs_indices");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_rhs_values, nz_rhs * sizeof(f_t)), "cudaMalloc d_rhs values");
+    CUDA_CALL_AND_CHECK(
+        cudaMemcpy(d_rhs_values, rhs.x.data(), nz_rhs * sizeof(f_t), cudaMemcpyHostToDevice),
+        "cudaMemcpy rhs values to d_rhs");
+
+    int block_size = 256;
+    int grid_size = (m + block_size - 1) / block_size;
+    denseMatrixSparseVectorMulKernel<<<grid_size, block_size>>>(m, d_B_pinv, d_rhs_indices,
+                                                                d_rhs_values, nz_rhs, d_x);
+    CUDA_CALL_AND_CHECK(cudaGetLastError(), "denseMatrixSparseVectorMulKernel");
+
+    // Compute d_x = B_pinv * d_rhs
+
+    // const f_t alpha = 1.0;
+    // const f_t beta = 0.0;
+    // cublasOperation_t op = transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
+    // CUBLAS_CALL_AND_CHECK(
+    //     cublasDgemv(cublas_handle, op, m, m, &alpha, d_B_pinv, m, d_rhs, 1, &beta, d_x, 1),
+    //     "cublasSgemv pinv_solve");
+    //
+    // // Copy dense d_x to sparse x
+    std::vector<f_t> h_x_dense(m);
+    CUDA_CALL_AND_CHECK(cudaMemcpy(h_x_dense.data(), d_x, m * sizeof(f_t), cudaMemcpyDeviceToHost),
+                        "cudaMemcpy d_x to x");
+    x.i.clear();
+    x.x.clear();
+    for (i_t i = 0; i < m; ++i) {
+        if (std::abs(h_x_dense[i]) > 1e-12) {
+            x.i.push_back(i);
+            x.x.push_back(h_x_dense[i]);
+        }
+    }
+
+    CUDA_CALL_AND_CHECK(cudaFree(d_rhs_indices), "cudaFree d_rhs indices");
+    CUDA_CALL_AND_CHECK(cudaFree(d_rhs_values), "cudaFree d_rhs values");
+    CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
+}
+
 } // namespace phase2_cu
 
 template <typename i_t, typename f_t>
@@ -711,10 +826,15 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     i_t *d_B_col_ind;
     f_t *d_B_values;
     i_t nz_B;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_row_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_B_row_ptr");
+
     i_t *d_Bt_row_ptr;
     i_t *d_Bt_col_ind;
     f_t *d_Bt_values;
     i_t nz_Bt;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_row_ptr, (m + 1) * sizeof(i_t)),
+                        "cudaMalloc d_Bt_row_ptr");
+
     f_t *d_B_pinv;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
     phase2_cu::compute_inverse<i_t, f_t>(cusparse_handle, cudss_handle, cudss_config, m, n,
@@ -732,7 +852,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     }
 
     // Solve B'*y = cB
-    phase2::pinv_solve(cublas_handle, d_B_pinv, c_basic, y, m, true);
+    phase2_cu::pinv_solve(cublas_handle, d_B_pinv, c_basic, y, m, true);
 
     if (toc(start_time) > settings.time_limit) {
         return dual::status_t::TIME_LIMIT;
@@ -1137,6 +1257,11 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             }
         }
 
+            // Free old B and Bt and recompute
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
         // Free old B and Bt and recompute
         CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
         CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
@@ -1183,6 +1308,12 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             if (settings.profile) {
                 settings.timer.start("Inverse Refactorizaton");
             }
+
+            // Free old B and Bt
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
+            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
 
             // Recompute d_B_pinv
             phase2_cu::compute_inverse<i_t, f_t>(
@@ -1248,6 +1379,11 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     }
 
     // Cleanup GPU resources
+    CUDA_CALL_AND_CHECK(cudaFree(d_A_col_ptr), "cudaFree d_A_col_ptr");
+    CUDA_CALL_AND_CHECK(cudaFree(d_A_row_ind), "cudaFree d_A_row_ind");
+    CUDA_CALL_AND_CHECK(cudaFree(d_A_values), "cudaFree d_A_values");
+    CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
+    CUDA_CALL_AND_CHECK(cudaFree(d_Bt_row_ptr), "cudaFree d_Bt_row_ptr");
     CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv), "cudaFree d_D_pinv");
     CUBLAS_CALL_AND_CHECK(cublasDestroy(cublas_handle), "cublasDestroy");
     CUSPARSE_CALL_AND_CHECK(cusparseDestroy(cusparse_handle), "cusparseDestroy");
