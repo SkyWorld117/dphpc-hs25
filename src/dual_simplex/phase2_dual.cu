@@ -1,3 +1,5 @@
+#include "cudss.h"
+#include "cusparse.h"
 #include <cstdio>
 #include <cusparse.h>
 #include <driver_types.h>
@@ -288,10 +290,12 @@ void build_basis_and_basis_transpose_on_device(i_t m, const i_t *d_A_col_ptr,
 }
 
 template <typename i_t, typename f_t>
-i_t compute_inverse(i_t m, i_t n, const i_t *d_A_col_ptr, const i_t *d_A_row_ind,
-                    const f_t *d_A_values, i_t *&d_B_row_ptr, i_t *&d_B_col_ind, f_t *&d_B_values,
-                    i_t *&d_Bt_row_ptr, i_t *&d_Bt_col_ind, f_t *&d_Bt_values,
-                    const std::vector<i_t> &basic_list, f_t *&d_X, i_t &nz_B, i_t &nz_Bt) {
+i_t compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_handle,
+                    cudssConfig_t &cudss_config, i_t m, i_t n, const i_t *d_A_col_ptr,
+                    const i_t *d_A_row_ind, const f_t *d_A_values, i_t *&d_B_row_ptr,
+                    i_t *&d_B_col_ind, f_t *&d_B_values, i_t *&d_Bt_row_ptr, i_t *&d_Bt_col_ind,
+                    f_t *&d_Bt_values, const std::vector<i_t> &basic_list, f_t *&d_X, i_t &nz_B,
+                    i_t &nz_Bt) {
     // Move basic list to device
     // TODO: Consider to keep basic list on device
     i_t *d_basic_list;
@@ -320,14 +324,11 @@ i_t compute_inverse(i_t m, i_t n, const i_t *d_A_col_ptr, const i_t *d_A_row_ind
     // Synchronize streams before proceeding
     CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(), "cudaDeviceSynchronize after matrix assembly");
 
-    // Compute (B^T B) with cuSPARSE
-    cusparseHandle_t cusparse_handle;
     // Here we assume (B^T B) is also sparse
     i_t *d_BtB_row_ptr = nullptr;
     i_t *d_BtB_col_ind = nullptr;
     f_t *d_BtB_values = nullptr;
     cusparseSpMatDescr_t d_B_matrix, d_Bt_matrix, d_BtB_matrix;
-    CUSPARSE_CALL_AND_CHECK(cusparseCreate(&cusparse_handle), "cusparseCreate");
     CUSPARSE_CALL_AND_CHECK(cusparseCreateCsr(&d_B_matrix, m, m, nz_B, d_B_row_ptr, d_B_col_ind,
                                               d_B_values, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
                                               CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F),
@@ -417,19 +418,14 @@ i_t compute_inverse(i_t m, i_t n, const i_t *d_A_col_ptr, const i_t *d_A_row_ind
     CUSPARSE_CALL_AND_CHECK(cusparseDestroySpMat(d_B_matrix), "cusparseDestroySpMat B");
     CUSPARSE_CALL_AND_CHECK(cusparseDestroySpMat(d_Bt_matrix), "cusparseDestroySpMat B_T");
     CUSPARSE_CALL_AND_CHECK(cusparseDestroySpMat(d_BtB_matrix), "cusparseDestroySpMat B_T B");
-    CUSPARSE_CALL_AND_CHECK(cusparseDestroy(cusparse_handle), "cusparseDestroy");
 
     // Factor (B^T B) = L*U using cuDSS and solve for (B^T B) X = B^T
     // => X = (B^T B)^(-1) B^T is the pseudo-inverse of B
     cudssStatus_t dss_status = CUDSS_STATUS_SUCCESS;
 
-    cudssHandle_t dss_handle;
-    CUDSS_CALL_AND_CHECK(cudssCreate(&dss_handle), dss_status, "cudssCreateHandle B");
-
-    cudssConfig_t solverConfig;
     cudssData_t solverData;
-    CUDSS_CALL_AND_CHECK(cudssConfigCreate(&solverConfig), dss_status, "cudssCreateConfig B");
-    CUDSS_CALL_AND_CHECK(cudssDataCreate(dss_handle, &solverData), dss_status, "cudssCreateData B");
+    CUDSS_CALL_AND_CHECK(cudssDataCreate(cudss_handle, &solverData), dss_status,
+                         "cudssCreateData B");
 
     cudssMatrix_t d_BtB_matrix_cudss;
     CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(&d_BtB_matrix_cudss, m, m, nnz_BtB, d_BtB_row_ptr,
@@ -448,16 +444,16 @@ i_t compute_inverse(i_t m, i_t n, const i_t *d_A_col_ptr, const i_t *d_A_row_ind
         cudssMatrixCreateDn(&d_X_matrix_cudss, m, m, m, d_X, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
         dss_status, "cudssMatrixCreateDn for X");
 
-    CUDSS_CALL_AND_CHECK(cudssExecute(dss_handle, CUDSS_PHASE_ANALYSIS, solverConfig, solverData,
+    CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle, CUDSS_PHASE_ANALYSIS, cudss_config, solverData,
                                       d_BtB_matrix_cudss, d_X_matrix_cudss, d_Bt_matrix_cudss),
                          dss_status, "cudssExecute Analysis for B");
 
-    CUDSS_CALL_AND_CHECK(cudssExecute(dss_handle, CUDSS_PHASE_FACTORIZATION, solverConfig,
+    CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle, CUDSS_PHASE_FACTORIZATION, cudss_config,
                                       solverData, d_BtB_matrix_cudss, d_X_matrix_cudss,
                                       d_Bt_matrix_cudss),
                          dss_status, "cudssExecute Factorization for B");
 
-    CUDSS_CALL_AND_CHECK(cudssExecute(dss_handle, CUDSS_PHASE_SOLVE, solverConfig, solverData,
+    CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, cudss_config, solverData,
                                       d_BtB_matrix_cudss, d_X_matrix_cudss, d_Bt_matrix_cudss),
                          dss_status, "cudssExecute Solve for B");
 
@@ -467,10 +463,8 @@ i_t compute_inverse(i_t m, i_t n, const i_t *d_A_col_ptr, const i_t *d_A_row_ind
     CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_Bt_matrix_cudss), dss_status,
                          "cudssMatrixDestroy B_T");
     CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_X_matrix_cudss), dss_status, "cudssMatrixDestroy X");
-    CUDSS_CALL_AND_CHECK(cudssDataDestroy(dss_handle, solverData), dss_status,
+    CUDSS_CALL_AND_CHECK(cudssDataDestroy(cudss_handle, solverData), dss_status,
                          "cudssDataDestroy B");
-    CUDSS_CALL_AND_CHECK(cudssConfigDestroy(solverConfig), dss_status, "cudssConfigDestroy B");
-    CUDSS_CALL_AND_CHECK(cudssDestroy(dss_handle), dss_status, "cudssDestroyHandle B");
 
     // CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
     // CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
@@ -686,6 +680,17 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     analyzer.analyze();
     analyzer.display_analysis();
 
+    // create all handles
+    cublasHandle_t cublas_handle;
+    CUBLAS_CALL_AND_CHECK(cublasCreate(&cublas_handle), "cublasCreate");
+    cusparseHandle_t cusparse_handle;
+    CUSPARSE_CALL_AND_CHECK(cusparseCreate(&cusparse_handle), "cusparseCreate");
+    cudssStatus_t dss_status = CUDSS_STATUS_SUCCESS;
+    cudssHandle_t cudss_handle;
+    CUDSS_CALL_AND_CHECK(cudssCreate(&cudss_handle), dss_status, "cudssCreateHandle B");
+    cudssConfig_t cudss_config;
+    CUDSS_CALL_AND_CHECK(cudssConfigCreate(&cudss_config), dss_status, "cudssCreateConfig B");
+
     // Move A to device
     i_t *d_A_col_ptr;
     i_t *d_A_row_ind;
@@ -712,7 +717,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     i_t nz_Bt;
     f_t *d_B_pinv;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
-    phase2_cu::compute_inverse<i_t, f_t>(m, n, d_A_col_ptr, d_A_row_ind, d_A_values, d_B_row_ptr,
+    phase2_cu::compute_inverse<i_t, f_t>(cusparse_handle, cudss_handle, cudss_config, m, n,
+                                         d_A_col_ptr, d_A_row_ind, d_A_values, d_B_row_ptr,
                                          d_B_col_ind, d_B_values, d_Bt_row_ptr, d_Bt_col_ind,
                                          d_Bt_values, basic_list, d_B_pinv, nz_B, nz_Bt);
 
@@ -726,8 +732,6 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     }
 
     // Solve B'*y = cB
-    cublasHandle_t cublas_handle;
-    CUBLAS_CALL_AND_CHECK(cublasCreate(&cublas_handle), "cublasCreate");
     phase2::pinv_solve(cublas_handle, d_B_pinv, c_basic, y, m, true);
 
     if (toc(start_time) > settings.time_limit) {
@@ -1182,8 +1186,9 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
 
             // Recompute d_B_pinv
             phase2_cu::compute_inverse<i_t, f_t>(
-                m, n, d_A_col_ptr, d_A_row_ind, d_A_values, d_B_row_ptr, d_B_col_ind, d_B_values,
-                d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, basic_list, d_B_pinv, nz_B, nz_Bt);
+                cusparse_handle, cudss_handle, cudss_config, m, n, d_A_col_ptr, d_A_row_ind,
+                d_A_values, d_B_row_ptr, d_B_col_ind, d_B_values, d_Bt_row_ptr, d_Bt_col_ind,
+                d_Bt_values, basic_list, d_B_pinv, nz_B, nz_Bt);
 
             phase2::reset_basis_mark(basic_list, nonbasic_list, basic_mark, nonbasic_mark);
             phase2::compute_initial_primal_infeasibilities(
@@ -1245,6 +1250,9 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     // Cleanup GPU resources
     CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv), "cudaFree d_D_pinv");
     CUBLAS_CALL_AND_CHECK(cublasDestroy(cublas_handle), "cublasDestroy");
+    CUSPARSE_CALL_AND_CHECK(cusparseDestroy(cusparse_handle), "cusparseDestroy");
+    CUDSS_CALL_AND_CHECK(cudssConfigDestroy(cudss_config), dss_status, "cudssConfigDestroy B");
+    CUDSS_CALL_AND_CHECK(cudssDestroy(cudss_handle), dss_status, "cudssDestroyHandle B");
 
     return status;
 }
