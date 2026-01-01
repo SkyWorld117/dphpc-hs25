@@ -1,3 +1,24 @@
+# TODO
+
+## Yi
+- [x] implement using B_pinv as solver
+- [x] implement assembling B_T, B_T dense on device
+- [ ] eta updates for B_pinv
+
+## Sophia
+- [x] implement assembling B from A on device
+- [ ] figure out the cost of creating and destroying handles and matrix representations in cuSPARSE
+- [ ] investigate "nearly constant" size per row in the sparse matrix representation of B and Bt (fast reconstruction without reallocating memory every time)
+- [ ] implement dense matrix - sparse vector multiplication kernel
+
+## Julian
+- [ ] research on using different pivoting strategies in parallel
+- [ ] test the new idea of parallelizing the pivoting strategies
+
+## Not assigned
+- [ ] investigate the tradeoff of keeping basic_list on device vs copying it every time
+- [ ] move more data structures to device to reduce data transfer overhead (more kernels for various steps)
+
 # C++ Modules
 
 This directory contains the C++ modules for the cuOpt project.
