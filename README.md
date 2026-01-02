@@ -13,6 +13,17 @@
 - [ ] investigate "nearly constant" size per row in the sparse matrix representation of B and Bt (fast reconstruction without reallocating memory every time)
 - [ ] implement dense matrix - sparse vector multiplication kernel
 
+### On GPU / On CPU
+| GPU | CPU |
+|-----|-----|
+| - A     |     |
+| - b_row_ptr  |     |
+| - b_col_ind  |     |
+| - b_values   |     |
+| - B_inv
+|     |     |
+|     |     |
+
 ## Julian
 - [ ] research on using different pivoting strategies in parallel
 - [ ] test the new idea of parallelizing the pivoting strategies

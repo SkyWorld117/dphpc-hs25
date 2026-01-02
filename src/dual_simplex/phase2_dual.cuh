@@ -64,7 +64,7 @@ namespace phase2 {
 template <typename i_t, typename f_t>
 void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const std::vector<f_t>& rhs,
                 std::vector<f_t>& x, i_t m, bool transpose) {
-    // std::cout << "pinv_solve dense\n";
+    std::cout << "pinv_solve dense\n";
     f_t* d_rhs;
     f_t* d_x;
     CUDA_CALL_AND_CHECK(cudaMalloc((void**) &d_rhs, m * sizeof(f_t)), "cudaMalloc d_rhs");
@@ -86,7 +86,7 @@ void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const std::vector<
 template <typename i_t, typename f_t>
 void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const sparse_vector_t<i_t, f_t>& rhs,
                 sparse_vector_t<i_t, f_t>& x, i_t m, bool transpose) {
-    // std::cout << "pinv_solve sparse not optimized\n";
+    std::cout << "pinv_solve sparse not optimized\n";
     f_t* d_rhs;
     f_t* d_x;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_rhs, m * sizeof(f_t)), "cudaMalloc d_rhs");
