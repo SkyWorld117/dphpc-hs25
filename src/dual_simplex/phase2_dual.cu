@@ -735,8 +735,8 @@ void pinv_solve(cublasHandle_t &cublas_handle, f_t *d_B_pinv, const sparse_vecto
 
     int block_size = 256;
     int grid_size = (m + block_size - 1) / block_size;
-    denseMatrixSparseVectorMulKernel<<<grid_size, block_size>>>(m, d_B_pinv, d_rhs_indices,
-                                                                d_rhs_values, nz_rhs, d_x, transpose);
+    denseMatrixSparseVectorMulKernel<<<grid_size, block_size>>>(
+        m, d_B_pinv, d_rhs_indices, d_rhs_values, nz_rhs, d_x, transpose);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "denseMatrixSparseVectorMulKernel");
 
     // Compute d_x = B_pinv * d_rhs
@@ -1273,18 +1273,11 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             }
         }
 
-            // Free old B and Bt and recompute
-            CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
-            CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
-            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
-            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
         // Free old B and Bt and recompute
-        CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
-        CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
-        CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
-        CUDA_CALL_AND_CHECK(cudaFree(d_Bt_row_ptr), "cudaFree d_Bt_row_ptr");
-        CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
-        CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
+        // CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
+        // CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
+        // CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
+        // CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
 
         if (!should_refactor) {
             if (settings.profile) {
