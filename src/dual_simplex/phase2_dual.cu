@@ -1381,6 +1381,7 @@ i_t update_steepest_edge_norms(const simplex_solver_settings_t<i_t, f_t> &settin
         } else {
             const f_t wk = -scaled_delta_xB.x[h];
             f_t new_val = delta_y_steepest_edge[j] + wk * (2.0 * v[k] / wr + wk * omegar);
+            std::cout << "New val before max " << new_val << " for j " << j << std::endl;
             new_val = std::max(new_val, 1e-4);
 #ifdef STEEPEST_EDGE_DEBUG
             if (!(new_val >= 0)) {
@@ -1436,7 +1437,7 @@ __global__ void compute_primal_variables_nonbasiclist_kernel(
     if (std::abs(xj) < tight_tol * 10)
         return;
     for (i_t p = col_start; p < col_end; ++p) {
-        rhs[d_A_row_ind[p]] -= xj * d_A_values[p];
+        atomicAdd(&rhs[d_A_row_ind[p]], -xj * d_A_values[p]);
     }
 }
 
@@ -1899,6 +1900,13 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                                         d_A_col_ptr, d_A_row_ind, d_A_values, d_basic_list,
                                         d_nonbasic_list, settings.tight_tol, d_x, m, n);
 
+    CUDA_CALL_AND_CHECK(cudaMemcpy(x.data(), d_x, n * sizeof(f_t), cudaMemcpyDeviceToHost),
+                        "cudaMemcpy x to host");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(y.data(), d_y, m * sizeof(f_t), cudaMemcpyDeviceToHost),
+                        "cudaMemcpy y to host");
+    CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
+    CUDA_CALL_AND_CHECK(cudaFree(d_lp_rhs), "cudaFree d_lp_rhs");
+
     if (toc(start_time) > settings.time_limit) {
         return dual::status_t::TIME_LIMIT;
     }
@@ -2260,8 +2268,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(), "Before basis update");
         // Update basic and nonbasic lists and marks
 
-        // basic_list[basic_leaving_index] = entering_index;
-        // nonbasic_list[nonbasic_entering_index] = leaving_index;
+        basic_list[basic_leaving_index] = entering_index;
+        nonbasic_list[nonbasic_entering_index] = leaving_index;
         nonbasic_mark[entering_index] = -1;
         nonbasic_mark[leaving_index] = nonbasic_entering_index;
         basic_mark[leaving_index] = -1;
