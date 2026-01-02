@@ -638,17 +638,33 @@ template <typename i_t, typename f_t>
 __global__ void denseMatrixSparseVectorMulKernel(i_t m, const f_t *__restrict__ b_inv,
                                                  const i_t *__restrict__ sparse_vec_indices,
                                                  const f_t *__restrict__ sparse_vec_values,
-                                                 i_t nz_sparse_vec, f_t *__restrict__ result) {
+                                                 i_t nz_sparse_vec, f_t *__restrict__ result,
+                                                 bool transpose) {
     id_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m)
         return;
 
     f_t sum = 0.0;
-    result[idx] = 0;
     for (i_t k = 0; k < nz_sparse_vec; ++k) {
-        i_t mat_idx = sparse_vec_indices[k] * m + idx;
-        result[idx] += sparse_vec_values[k] * b_inv[mat_idx];
+        i_t vec_idx = sparse_vec_indices[k];
+        f_t vec_val = sparse_vec_values[k];
+
+        i_t mat_idx;
+        if (transpose) {
+            // We want (B_inv^T)_{idx, vec_idx} = (B_inv)_{vec_idx, idx}
+            // B_inv is col-major, so element (row=vec_idx, col=idx) is at:
+            // col * m + row = idx * m + vec_idx
+            mat_idx = idx * m + vec_idx;
+        } else {
+            // We want (B_inv)_{idx, vec_idx}
+            // B_inv is col-major, so element (row=idx, col=vec_idx) is at:
+            // col * m + row = vec_idx * m + idx
+            mat_idx = vec_idx * m + idx;
+        }
+
+        sum += vec_val * b_inv[mat_idx];
     }
+    result[idx] = sum;
 }
 
 template <typename i_t, typename f_t>
@@ -686,7 +702,7 @@ void pinv_solve(cublasHandle_t &cublas_handle, f_t *d_B_pinv, const std::vector<
     int block_size = 256;
     int grid_size = (m + block_size - 1) / block_size;
     denseMatrixSparseVectorMulKernel<<<grid_size, block_size>>>(m, d_B_pinv, d_rhs_indices,
-                                                                d_rhs_values, m, d_x);
+                                                                d_rhs_values, m, d_x, transpose);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "denseMatrixSparseVectorMulKernel");
     CUDA_CALL_AND_CHECK(cudaMemcpy(x.data(), d_x, m * sizeof(f_t), cudaMemcpyDeviceToHost),
                         "cudaMemcpy d_x to x");
@@ -720,7 +736,7 @@ void pinv_solve(cublasHandle_t &cublas_handle, f_t *d_B_pinv, const sparse_vecto
     int block_size = 256;
     int grid_size = (m + block_size - 1) / block_size;
     denseMatrixSparseVectorMulKernel<<<grid_size, block_size>>>(m, d_B_pinv, d_rhs_indices,
-                                                                d_rhs_values, nz_rhs, d_x);
+                                                                d_rhs_values, nz_rhs, d_x, transpose);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "denseMatrixSparseVectorMulKernel");
 
     // Compute d_x = B_pinv * d_rhs
