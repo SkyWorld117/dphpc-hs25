@@ -833,6 +833,10 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDSS_CALL_AND_CHECK(
         cudssConfigSet(cudss_config, CUDSS_CONFIG_USE_MATCHING, &use_matching, sizeof(i_t)),
         "cudssConfigSet USE_MATCHING");
+    cudssAlgType_t matching_alg = CUDSS_ALG_5;
+    CUDSS_CALL_AND_CHECK(
+        cudssConfigSet(cudss_config, CUDSS_CONFIG_MATCHING_ALG, &matching_alg, sizeof(i_t)),
+        "cudssConfigSet MATCHING_ALG");
 
     // cublasHandle_t cublas_handle;
     // CUBLAS_CALL_AND_CHECK(cublasCreate(&cublas_handle), "cublasCreate");
