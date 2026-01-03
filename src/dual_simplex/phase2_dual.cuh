@@ -21,6 +21,7 @@
 #include <cuda_runtime.h>
 #include <cudss.h>
 #include <cusparse.h>
+#include <vector>
 
 #define CUDA_CALL_AND_CHECK(call, msg)                                                             \
     do {                                                                                           \
@@ -30,9 +31,9 @@
         }                                                                                          \
     } while (0);
 
-#define CUDSS_CALL_AND_CHECK(call, status, msg)                                                    \
+#define CUDSS_CALL_AND_CHECK(call, msg)                                                            \
     do {                                                                                           \
-        status = call;                                                                             \
+        cudssStatus_t status = call;                                                               \
         if (status != CUDSS_STATUS_SUCCESS) {                                                      \
             printf("CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n",        \
                    status);                                                                        \
@@ -60,6 +61,84 @@
 namespace cuopt::linear_programming::dual_simplex {
 
 namespace phase2 {
+
+template <typename i_t, typename f_t>
+void LU_solve(cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config, cudssData_t& solver_data,
+              cudssMatrix_t& d_B_matrix_cudss, const std::vector<f_t>& rhs, std::vector<f_t>& x,
+              i_t m) {
+    f_t* d_rhs;
+    f_t* d_x;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_rhs, m * sizeof(f_t)), "cudaMalloc d_rhs");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_x, m * sizeof(f_t)), "cudaMalloc d_x");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(d_rhs, rhs.data(), m * sizeof(f_t), cudaMemcpyHostToDevice),
+                        "cudaMemcpy rhs to d_rhs");
+    cudssMatrix_t d_rhs_cudss, d_x_cudss;
+    CUDSS_CALL_AND_CHECK(
+        cudssMatrixCreateDn(&d_rhs_cudss, m, 1, m, d_rhs, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+        "cudssMatrixCreateDn d_rhs_cudss");
+    CUDSS_CALL_AND_CHECK(
+        cudssMatrixCreateDn(&d_x_cudss, m, 1, m, d_x, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+        "cudssMatrixCreateDn d_x_cudss");
+    CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, cudss_config, solver_data,
+                                      d_B_matrix_cudss, d_x_cudss, d_rhs_cudss),
+                         "cudssExecute LU_solve");
+    CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(), "cudaDeviceSynchronize after cudssExecute LU_solve");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(x.data(), d_x, m * sizeof(f_t), cudaMemcpyDeviceToHost),
+                        "cudaMemcpy d_x to x");
+    CUDA_CALL_AND_CHECK(cudaFree(d_rhs), "cudaFree d_rhs");
+    CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_rhs_cudss), "cudssMatrixDestroy d_rhs_cudss");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_x_cudss), "cudssMatrixDestroy d_x_cudss");
+}
+
+template <typename i_t, typename f_t>
+void LU_solve(cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config, cudssData_t& solver_data,
+              cudssMatrix_t& d_B_matrix_cudss, const sparse_vector_t<i_t, f_t>& rhs, sparse_vector_t<i_t, f_t>& x,
+              i_t m) {
+    f_t* d_rhs;
+    f_t* d_x;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_rhs, m * sizeof(f_t)), "cudaMalloc d_rhs");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_x, m * sizeof(f_t)), "cudaMalloc d_x");
+
+    // Copy sparse rhs to dense d_rhs
+    std::vector<f_t> h_rhs_dense(m, 0.0);
+    const i_t nz_rhs = rhs.i.size();
+    for (i_t k = 0; k < nz_rhs; ++k) {
+        h_rhs_dense[rhs.i[k]] = rhs.x[k];
+    }
+    CUDA_CALL_AND_CHECK(cudaMemcpy(d_rhs, h_rhs_dense.data(), m * sizeof(f_t), cudaMemcpyHostToDevice),
+                        "cudaMemcpy rhs to d_rhs");
+
+    cudssMatrix_t d_rhs_cudss, d_x_cudss;
+    CUDSS_CALL_AND_CHECK(
+        cudssMatrixCreateDn(&d_rhs_cudss, m, 1, m, d_rhs, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+        "cudssMatrixCreateDn d_rhs_cudss");
+    CUDSS_CALL_AND_CHECK(
+        cudssMatrixCreateDn(&d_x_cudss, m, 1, m, d_x, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+        "cudssMatrixCreateDn d_x_cudss");
+    CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, cudss_config, solver_data,
+                                      d_B_matrix_cudss, d_x_cudss, d_rhs_cudss),
+                         "cudssExecute LU_solve");
+    CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(), "cudaDeviceSynchronize after cudssExecute LU_solve");
+
+    // Copy dense d_x to sparse x
+    std::vector<f_t> h_x_dense(m);
+    CUDA_CALL_AND_CHECK(cudaMemcpy(h_x_dense.data(), d_x, m * sizeof(f_t), cudaMemcpyDeviceToHost),
+                        "cudaMemcpy d_x to x");
+    x.i.clear();
+    x.x.clear();
+    for (i_t i = 0; i < m; ++i) {
+        if (std::abs(h_x_dense[i]) > 1e-12) {
+            x.i.push_back(i);
+            x.x.push_back(h_x_dense[i]);
+        }
+    }
+
+    CUDA_CALL_AND_CHECK(cudaFree(d_rhs), "cudaFree d_rhs");
+    CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_rhs_cudss), "cudssMatrixDestroy d_rhs_cudss");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_x_cudss), "cudssMatrixDestroy d_x_cudss");
+}
 
 template <typename i_t, typename f_t>
 void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const std::vector<f_t>& rhs,
@@ -476,7 +555,13 @@ void compute_reduced_costs(const std::vector<f_t>& objective, const csc_matrix_t
 }
 
 template <typename i_t, typename f_t>
-void compute_primal_variables(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+// void compute_primal_variables(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+//                               const std::vector<f_t>& lp_rhs, const csc_matrix_t<i_t, f_t>& A,
+//                               const std::vector<i_t>& basic_list,
+//                               const std::vector<i_t>& nonbasic_list, f_t tight_tol,
+//                               std::vector<f_t>& x) {
+void compute_primal_variables(cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config,
+                              cudssData_t& solver_data, cudssMatrix_t& d_B_matrix_cudss,
                               const std::vector<f_t>& lp_rhs, const csc_matrix_t<i_t, f_t>& A,
                               const std::vector<i_t>& basic_list,
                               const std::vector<i_t>& nonbasic_list, f_t tight_tol,
@@ -500,7 +585,9 @@ void compute_primal_variables(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
 
     std::vector<f_t> xB(m);
     //   ft.b_solve(rhs, xB);
-    phase2::pinv_solve<i_t, f_t>(cublas_handle, d_B_pinv, rhs, xB, m, false);
+    // phase2::pinv_solve<i_t, f_t>(cublas_handle, d_B_pinv, rhs, xB, m, false);
+    phase2::LU_solve<i_t, f_t>(cudss_handle, cudss_config, solver_data, d_B_matrix_cudss, rhs, xB,
+                               m);
 
     for (i_t k = 0; k < m; ++k) {
         const i_t j = basic_list[k];
@@ -592,8 +679,14 @@ void compute_bounded_info(const std::vector<f_t>& lower, const std::vector<f_t>&
 }
 
 template <typename i_t, typename f_t>
+// void compute_dual_solution_from_basis(const lp_problem_t<i_t, f_t>& lp,
+//                                       cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+//                                       const std::vector<i_t>& basic_list,
+//                                       const std::vector<i_t>& nonbasic_list, std::vector<f_t>& y,
+//                                       std::vector<f_t>& z) {
 void compute_dual_solution_from_basis(const lp_problem_t<i_t, f_t>& lp,
-                                      cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+                                      cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config,
+                                      cudssData_t& solver_data, cudssMatrix_t& d_Bt_matrix_cudss,
                                       const std::vector<i_t>& basic_list,
                                       const std::vector<i_t>& nonbasic_list, std::vector<f_t>& y,
                                       std::vector<f_t>& z) {
@@ -607,7 +700,9 @@ void compute_dual_solution_from_basis(const lp_problem_t<i_t, f_t>& lp,
         cB[k] = lp.objective[j];
     }
     //   ft.b_transpose_solve(cB, y);
-    phase2::pinv_solve<i_t, f_t>(cublas_handle, d_B_pinv, cB, y, m, true);
+    // phase2::pinv_solve<i_t, f_t>(cublas_handle, d_B_pinv, cB, y, m, true);
+    phase2::LU_solve<i_t, f_t>(cudss_handle, cudss_config, solver_data, d_Bt_matrix_cudss,
+                               cB, y, m);
 
     // We want A'y + z = c
     // A = [ B N ]
@@ -636,8 +731,16 @@ void compute_dual_solution_from_basis(const lp_problem_t<i_t, f_t>& lp,
 }
 
 template <typename i_t, typename f_t>
+// i_t compute_primal_solution_from_basis(const lp_problem_t<i_t, f_t>& lp,
+//                                        cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+//                                        const std::vector<i_t>& basic_list,
+//                                        const std::vector<i_t>& nonbasic_list,
+//                                        const std::vector<variable_status_t>& vstatus,
+//                                        std::vector<f_t>& x) {
 i_t compute_primal_solution_from_basis(const lp_problem_t<i_t, f_t>& lp,
-                                       cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+                                       cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config,
+                                       cudssData_t& solver_data,
+                                       cudssMatrix_t& d_B_matrix_cudss,
                                        const std::vector<i_t>& basic_list,
                                        const std::vector<i_t>& nonbasic_list,
                                        const std::vector<variable_status_t>& vstatus,
@@ -672,7 +775,9 @@ i_t compute_primal_solution_from_basis(const lp_problem_t<i_t, f_t>& lp,
 
     std::vector<f_t> xB(m);
     //   ft.b_solve(rhs, xB);
-    phase2::pinv_solve<i_t, f_t>(cublas_handle, d_B_pinv, rhs, xB, m, false);
+    // phase2::pinv_solve<i_t, f_t>(cublas_handle, d_B_pinv, rhs, xB, m, false);
+    phase2::LU_solve<i_t, f_t>(cudss_handle, cudss_config, solver_data, d_B_matrix_cudss, rhs,
+                               xB, m);
 
     for (i_t k = 0; k < m; ++k) {
         const i_t j = basic_list[k];
@@ -1108,10 +1213,16 @@ void initialize_steepest_edge_norms_from_slack_basis(const std::vector<i_t>& bas
 }
 
 template <typename i_t, typename f_t>
+// i_t initialize_steepest_edge_norms(const lp_problem_t<i_t, f_t>& lp,
+//                                    const simplex_solver_settings_t<i_t, f_t>& settings,
+//                                    const f_t start_time, const std::vector<i_t>& basic_list,
+//                                    cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+//                                    std::vector<f_t>& delta_y_steepest_edge) {
 i_t initialize_steepest_edge_norms(const lp_problem_t<i_t, f_t>& lp,
                                    const simplex_solver_settings_t<i_t, f_t>& settings,
                                    const f_t start_time, const std::vector<i_t>& basic_list,
-                                   cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+                                   cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config,
+                                   cudssData_t& solver_data, cudssMatrix_t& d_Bt_matrix_cudss,
                                    std::vector<f_t>& delta_y_steepest_edge) {
     const i_t m = basic_list.size();
 
@@ -1211,7 +1322,9 @@ i_t initialize_steepest_edge_norms(const lp_problem_t<i_t, f_t>& lp,
 #else
             sparse_vector_t<i_t, f_t> sparse_dy(m, 0);
             //   ft.b_transpose_solve(sparse_ei, sparse_dy);
-            phase2::pinv_solve(cublas_handle, d_B_pinv, sparse_ei, sparse_dy, m, true);
+            // phase2::pinv_solve(cublas_handle, d_B_pinv, sparse_ei, sparse_dy, m, true);
+            phase2::LU_solve(cudss_handle, cudss_config, solver_data, d_Bt_matrix_cudss, sparse_ei,
+                             sparse_dy, m);
             f_t my_init = 0.0;
             for (i_t p = 0; p < (i_t) (sparse_dy.x.size()); ++p) {
                 my_init += sparse_dy.x[p] * sparse_dy.x[p];
@@ -1248,9 +1361,15 @@ i_t initialize_steepest_edge_norms(const lp_problem_t<i_t, f_t>& lp,
 }
 
 template <typename i_t, typename f_t>
+// i_t update_steepest_edge_norms(const simplex_solver_settings_t<i_t, f_t>& settings,
+//                                const std::vector<i_t>& basic_list, cublasHandle_t& cublas_handle,
+//                                f_t* d_B_pinv, i_t direction,
+//                                const sparse_vector_t<i_t, f_t>& delta_y_sparse, f_t dy_norm_squared,
+//                                const sparse_vector_t<i_t, f_t>& scaled_delta_xB,
+//                                i_t basic_leaving_index, i_t entering_index, std::vector<f_t>& v,
+//                                std::vector<f_t>& delta_y_steepest_edge) {
 i_t update_steepest_edge_norms(const simplex_solver_settings_t<i_t, f_t>& settings,
-                               const std::vector<i_t>& basic_list, cublasHandle_t& cublas_handle,
-                               f_t* d_B_pinv, i_t direction,
+                               const std::vector<i_t>& basic_list, cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config, cudssData_t& solver_data, cudssMatrix_t& d_B_matrix_cudss, i_t direction,
                                const sparse_vector_t<i_t, f_t>& delta_y_sparse, f_t dy_norm_squared,
                                const sparse_vector_t<i_t, f_t>& scaled_delta_xB,
                                i_t basic_leaving_index, i_t entering_index, std::vector<f_t>& v,
@@ -1261,7 +1380,9 @@ i_t update_steepest_edge_norms(const simplex_solver_settings_t<i_t, f_t>& settin
     // B^T delta_y = - direction * e_basic_leaving_index
     // We want B v =  - B^{-T} e_basic_leaving_index
     //   ft.b_solve(delta_y_sparse, v_sparse);
-    phase2::pinv_solve(cublas_handle, d_B_pinv, delta_y_sparse, v_sparse, m, false);
+    // phase2::pinv_solve(cublas_handle, d_B_pinv, delta_y_sparse, v_sparse, m, false);
+    phase2::LU_solve(cudss_handle, cudss_config, solver_data, d_B_matrix_cudss, delta_y_sparse,
+                     v_sparse, m);
     if (direction == -1) {
         v_sparse.negate();
     }
@@ -1318,8 +1439,13 @@ i_t update_steepest_edge_norms(const simplex_solver_settings_t<i_t, f_t>& settin
 
 // Compute steepest edge info for entering variable
 template <typename i_t, typename f_t>
+// i_t compute_steepest_edge_norm_entering(const simplex_solver_settings_t<i_t, f_t>& settings, i_t m,
+//                                         cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+//                                         i_t basic_leaving_index, i_t entering_index,
+//                                         std::vector<f_t>& steepest_edge_norms) {
 i_t compute_steepest_edge_norm_entering(const simplex_solver_settings_t<i_t, f_t>& settings, i_t m,
-                                        cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+                                        cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config,
+                                        cudssData_t& solver_data, cudssMatrix_t& d_Bt_matrix_cudss,
                                         i_t basic_leaving_index, i_t entering_index,
                                         std::vector<f_t>& steepest_edge_norms) {
     sparse_vector_t<i_t, f_t> es_sparse(m, 1);
@@ -1327,7 +1453,9 @@ i_t compute_steepest_edge_norm_entering(const simplex_solver_settings_t<i_t, f_t
     es_sparse.x[0] = -1.0;
     sparse_vector_t<i_t, f_t> delta_ys_sparse(m, 0);
     //   // ft.b_transpose_solve(es_sparse, delta_ys_sparse);
-    phase2::pinv_solve(cublas_handle, d_B_pinv, es_sparse, delta_ys_sparse, m, true);
+    // phase2::pinv_solve(cublas_handle, d_B_pinv, es_sparse, delta_ys_sparse, m, true);
+    phase2::LU_solve(cudss_handle, cudss_config, solver_data, d_Bt_matrix_cudss, es_sparse,
+                     delta_ys_sparse, m);
     steepest_edge_norms[entering_index] = delta_ys_sparse.norm2_squared();
 
 #ifdef STEEPEST_EDGE_DEBUG
@@ -1431,7 +1559,9 @@ void reset_basis_mark(const std::vector<i_t>& basic_list, const std::vector<i_t>
 }
 
 template <typename i_t, typename f_t>
-void compute_delta_y(cublasHandle_t& cublas_handle, f_t* d_B_pinv, i_t basic_leaving_index,
+// void compute_delta_y(cublasHandle_t& cublas_handle, f_t* d_B_pinv, i_t basic_leaving_index,
+//                      i_t direction, sparse_vector_t<i_t, f_t>& delta_y_sparse) {
+void compute_delta_y(cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config, cudssData_t& solver_data, cudssMatrix_t& d_Bt_matrix_cudss, i_t basic_leaving_index,
                      i_t direction, sparse_vector_t<i_t, f_t>& delta_y_sparse) {
     const i_t m = delta_y_sparse.n;
     // BT*delta_y = -delta_zB = -sigma*ei
@@ -1439,7 +1569,9 @@ void compute_delta_y(cublasHandle_t& cublas_handle, f_t* d_B_pinv, i_t basic_lea
     ei_sparse.i[0] = basic_leaving_index;
     ei_sparse.x[0] = -direction;
     //   ft.b_transpose_solve(ei_sparse, delta_y_sparse, UTsol_sparse);
-    phase2::pinv_solve(cublas_handle, d_B_pinv, ei_sparse, delta_y_sparse, m, true);
+    // phase2::pinv_solve(cublas_handle, d_B_pinv, ei_sparse, delta_y_sparse, m, true);
+    phase2::LU_solve(cudss_handle, cudss_config, solver_data, d_Bt_matrix_cudss, ei_sparse,
+                     delta_y_sparse, m);
 
 #ifdef CHECK_B_TRANSPOSE_SOLVE
     std::vector<f_t> delta_y_sparse_vector_check(m);
@@ -1487,7 +1619,12 @@ void update_dual_variables(const sparse_vector_t<i_t, f_t>& delta_y_sparse,
 }
 
 template <typename i_t, typename f_t>
-void adjust_for_flips(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+// void adjust_for_flips(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+//                       const std::vector<i_t>& basic_list, const std::vector<i_t>& delta_z_indices,
+//                       std::vector<i_t>& atilde_index, std::vector<f_t>& atilde,
+//                       std::vector<i_t>& atilde_mark, sparse_vector_t<i_t, f_t>& delta_xB_0_sparse,
+//                       std::vector<f_t>& delta_x_flip, std::vector<f_t>& x) {
+void adjust_for_flips(cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config, cudssData_t& solver_data, cudssMatrix_t& d_B_matrix_cudss,
                       const std::vector<i_t>& basic_list, const std::vector<i_t>& delta_z_indices,
                       std::vector<i_t>& atilde_index, std::vector<f_t>& atilde,
                       std::vector<i_t>& atilde_mark, sparse_vector_t<i_t, f_t>& delta_xB_0_sparse,
@@ -1501,7 +1638,9 @@ void adjust_for_flips(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
         atilde_sparse.x[k] = atilde[atilde_index[k]];
     }
     //   ft.b_solve(atilde_sparse, delta_xB_0_sparse);
-    phase2::pinv_solve(cublas_handle, d_B_pinv, atilde_sparse, delta_xB_0_sparse, m, false);
+    // phase2::pinv_solve(cublas_handle, d_B_pinv, atilde_sparse, delta_xB_0_sparse, m, false);
+    phase2::LU_solve(cudss_handle, cudss_config, solver_data, d_B_matrix_cudss, atilde_sparse,
+                     delta_xB_0_sparse, m);
     const i_t delta_xB_0_nz = delta_xB_0_sparse.i.size();
     for (i_t k = 0; k < delta_xB_0_nz; ++k) {
         const i_t j = basic_list[delta_xB_0_sparse.i[k]];
@@ -1525,7 +1664,12 @@ void adjust_for_flips(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
 }
 
 template <typename i_t, typename f_t>
-i_t compute_delta_x(const lp_problem_t<i_t, f_t>& lp, cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+// i_t compute_delta_x(const lp_problem_t<i_t, f_t>& lp, cublasHandle_t& cublas_handle, f_t* d_B_pinv,
+//                     i_t entering_index, i_t leaving_index, i_t basic_leaving_index, i_t direction,
+//                     const std::vector<i_t>& basic_list, const std::vector<f_t>& delta_x_flip,
+//                     const sparse_vector_t<i_t, f_t>& rhs_sparse, const std::vector<f_t>& x,
+//                     sparse_vector_t<i_t, f_t>& scaled_delta_xB_sparse, std::vector<f_t>& delta_x) {
+i_t compute_delta_x(const lp_problem_t<i_t, f_t>& lp, cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config, cudssData_t& solver_data, cudssMatrix_t& d_B_matrix_cudss,
                     i_t entering_index, i_t leaving_index, i_t basic_leaving_index, i_t direction,
                     const std::vector<i_t>& basic_list, const std::vector<f_t>& delta_x_flip,
                     const sparse_vector_t<i_t, f_t>& rhs_sparse, const std::vector<f_t>& x,
@@ -1534,8 +1678,10 @@ i_t compute_delta_x(const lp_problem_t<i_t, f_t>& lp, cublasHandle_t& cublas_han
                                          : lp.upper[leaving_index] - x[leaving_index];
     // B*w = -A(:, entering)
     //   ft.b_solve(rhs_sparse, scaled_delta_xB_sparse, utilde_sparse);
-    phase2::pinv_solve(cublas_handle, d_B_pinv, rhs_sparse, scaled_delta_xB_sparse,
-                       (i_t) (basic_list.size()), false);
+    // phase2::pinv_solve(cublas_handle, d_B_pinv, rhs_sparse, scaled_delta_xB_sparse,
+    //                    (i_t) (basic_list.size()), false);
+    phase2::LU_solve(cudss_handle, cudss_config, solver_data, d_B_matrix_cudss, rhs_sparse,
+                     scaled_delta_xB_sparse, (i_t)(basic_list.size()));
     scaled_delta_xB_sparse.negate();
 
 #ifdef CHECK_B_SOLVE
@@ -1567,7 +1713,9 @@ i_t compute_delta_x(const lp_problem_t<i_t, f_t>& lp, cublasHandle_t& cublas_han
         const i_t m = basic_list.size();
         std::vector<f_t> scaled_delta_xB(m);
         // ft.b_solve(rhs, scaled_delta_xB);
-        phase2::pinv_solve(cublas_handle, d_B_pinv, rhs, scaled_delta_xB, m, false);
+        // phase2::pinv_solve(cublas_handle, d_B_pinv, rhs, scaled_delta_xB, m, false);
+        phase2::LU_solve(cudss_handle, cudss_config, solver_data, d_B_matrix_cudss, rhs,
+                         scaled_delta_xB, m);
         if (scaled_delta_xB[basic_leaving_index] != 0.0 &&
             !std::isnan(scaled_delta_xB[basic_leaving_index])) {
             scaled_delta_xB_sparse.from_dense(scaled_delta_xB);
@@ -1932,9 +2080,18 @@ f_t amount_of_perturbation(const lp_problem_t<i_t, f_t>& lp, const std::vector<f
 }
 
 template <typename i_t, typename f_t>
+// void prepare_optimality(const lp_problem_t<i_t, f_t>& lp,
+//                         const simplex_solver_settings_t<i_t, f_t>& settings, cublasHandle_t& handle,
+//                         f_t* d_B_pinv, const std::vector<f_t>& objective,
+//                         const std::vector<i_t>& basic_list, const std::vector<i_t>& nonbasic_list,
+//                         const std::vector<variable_status_t>& vstatus, int phase, f_t start_time,
+//                         f_t max_val, i_t iter, const std::vector<f_t>& x, std::vector<f_t>& y,
+//                         std::vector<f_t>& z, lp_solution_t<i_t, f_t>& sol) {
 void prepare_optimality(const lp_problem_t<i_t, f_t>& lp,
-                        const simplex_solver_settings_t<i_t, f_t>& settings, cublasHandle_t& handle,
-                        f_t* d_B_pinv, const std::vector<f_t>& objective,
+                        const simplex_solver_settings_t<i_t, f_t>& settings,
+                        cudssHandle_t& cudss_handle, cudssConfig_t& cudss_config, cudssData_t& solver_data,
+                        cudssMatrix_t& d_Bt_matrix_cudss,
+                        const std::vector<f_t>& objective,
                         const std::vector<i_t>& basic_list, const std::vector<i_t>& nonbasic_list,
                         const std::vector<variable_status_t>& vstatus, int phase, f_t start_time,
                         f_t max_val, i_t iter, const std::vector<f_t>& x, std::vector<f_t>& y,
@@ -1949,7 +2106,10 @@ void prepare_optimality(const lp_problem_t<i_t, f_t>& lp,
         // Try to remove perturbation
         std::vector<f_t> unperturbed_y(m);
         std::vector<f_t> unperturbed_z(n);
-        phase2::compute_dual_solution_from_basis(lp, handle, d_B_pinv, basic_list, nonbasic_list,
+        // phase2::compute_dual_solution_from_basis(lp, handle, d_B_pinv, basic_list, nonbasic_list,
+        //                                          unperturbed_y, unperturbed_z);
+        phase2::compute_dual_solution_from_basis(lp, cudss_handle, cudss_config, solver_data, d_Bt_matrix_cudss,
+                                                 basic_list, nonbasic_list,
                                                  unperturbed_y, unperturbed_z);
         {
             const f_t dual_infeas = phase2::dual_infeasibility(

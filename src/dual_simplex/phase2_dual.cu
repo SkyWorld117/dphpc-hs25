@@ -423,47 +423,41 @@ i_t compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_hand
     cudssStatus_t dss_status = CUDSS_STATUS_SUCCESS;
 
     cudssData_t solverData;
-    CUDSS_CALL_AND_CHECK(cudssDataCreate(cudss_handle, &solverData), dss_status,
-                         "cudssCreateData B");
+    CUDSS_CALL_AND_CHECK(cudssDataCreate(cudss_handle, &solverData), "cudssCreateData B");
 
     cudssMatrix_t d_BtB_matrix_cudss;
     CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(&d_BtB_matrix_cudss, m, m, nnz_BtB, d_BtB_row_ptr,
                                               NULL, d_BtB_col_ind, d_BtB_values, CUDA_R_32I,
                                               CUDA_R_64F, CUDSS_MTYPE_SPD, CUDSS_MVIEW_FULL,
                                               CUDSS_BASE_ZERO),
-                         dss_status, "cudssMatrixCreateCsr for B");
+                         "cudssMatrixCreateCsr for B");
 
     cudssMatrix_t d_Bt_matrix_cudss;
     CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(&d_Bt_matrix_cudss, m, m, m, d_Bt_dense, CUDA_R_64F,
                                              CUDSS_LAYOUT_COL_MAJOR),
-                         dss_status, "cudssMatrixCreateDn for B_T");
+                         "cudssMatrixCreateDn for B_T");
 
     cudssMatrix_t d_X_matrix_cudss; // This is the pseudo-inverse of B
     CUDSS_CALL_AND_CHECK(
         cudssMatrixCreateDn(&d_X_matrix_cudss, m, m, m, d_X, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
-        dss_status, "cudssMatrixCreateDn for X");
+        "cudssMatrixCreateDn for X");
 
     CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle, CUDSS_PHASE_ANALYSIS, cudss_config, solverData,
                                       d_BtB_matrix_cudss, d_X_matrix_cudss, d_Bt_matrix_cudss),
-                         dss_status, "cudssExecute Analysis for B");
-
+                         "cudssExecute Analysis for B");
     CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle, CUDSS_PHASE_FACTORIZATION, cudss_config,
                                       solverData, d_BtB_matrix_cudss, d_X_matrix_cudss,
                                       d_Bt_matrix_cudss),
-                         dss_status, "cudssExecute Factorization for B");
+                         "cudssExecute Factorization for B");
 
     CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, cudss_config, solverData,
                                       d_BtB_matrix_cudss, d_X_matrix_cudss, d_Bt_matrix_cudss),
-                         dss_status, "cudssExecute Solve for B");
-
+                         "cudssExecute Solve for B");
     // cuDSS cleanup
-    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_BtB_matrix_cudss), dss_status,
-                         "cudssMatrixDestroy B_T B");
-    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_Bt_matrix_cudss), dss_status,
-                         "cudssMatrixDestroy B_T");
-    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_X_matrix_cudss), dss_status, "cudssMatrixDestroy X");
-    CUDSS_CALL_AND_CHECK(cudssDataDestroy(cudss_handle, solverData), dss_status,
-                         "cudssDataDestroy B");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_BtB_matrix_cudss), "cudssMatrixDestroy B_T B");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_Bt_matrix_cudss), "cudssMatrixDestroy B_T");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_X_matrix_cudss), "cudssMatrixDestroy X");
+    CUDSS_CALL_AND_CHECK(cudssDataDestroy(cudss_handle, solverData), "cudssDataDestroy B");
 
     // CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
     // CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
@@ -766,6 +760,24 @@ void pinv_solve(cublasHandle_t &cublas_handle, f_t *d_B_pinv, const sparse_vecto
     CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
 }
 
+template <typename i_t, typename f_t>
+void LU_factorization(cudssHandle_t cudss_handle, cudssConfig_t cudss_config, i_t m,
+                      i_t *d_B_row_ptr, i_t *d_B_col_ind, f_t *d_B_values, cudssData_t &solverData,
+                      cudssMatrix_t &d_B_matrix_cudss, const i_t nz_B) {
+    CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(&d_B_matrix_cudss, m, m, nz_B, d_B_row_ptr, NULL,
+                                              d_B_col_ind, d_B_values, CUDA_R_32I, CUDA_R_64F,
+                                              CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL,
+                                              CUDSS_BASE_ZERO),
+                         "cudssMatrixCreateCsr for B");
+
+    CUDSS_CALL_AND_CHECK(cudssDataCreate(cudss_handle, &solverData), "cudssCreateData B");
+    CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle,
+                                      CUDSS_PHASE_ANALYSIS | CUDSS_PHASE_FACTORIZATION,
+                                      cudss_config, solverData, d_B_matrix_cudss, nullptr, nullptr),
+                         "cudssExecute Analysis and Factorization for B");
+    CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(), "cudaDeviceSynchronize after LU factorization");
+}
+
 } // namespace phase2_cu
 
 template <typename i_t, typename f_t>
@@ -806,21 +818,31 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     assert(superbasic_list.size() == 0);
     assert(nonbasic_list.size() == n - m);
 
-    // Analyze matrix A
-    problem_analyzer_t<i_t, f_t> analyzer(lp, settings);
-    analyzer.analyze();
-    analyzer.display_analysis();
+    // // Analyze matrix A
+    // problem_analyzer_t<i_t, f_t> analyzer(lp, settings);
+    // analyzer.analyze();
+    // analyzer.display_analysis();
 
     // create all handles
-    cublasHandle_t cublas_handle;
-    CUBLAS_CALL_AND_CHECK(cublasCreate(&cublas_handle), "cublasCreate");
-    cusparseHandle_t cusparse_handle;
-    CUSPARSE_CALL_AND_CHECK(cusparseCreate(&cusparse_handle), "cusparseCreate");
-    cudssStatus_t dss_status = CUDSS_STATUS_SUCCESS;
-    cudssHandle_t cudss_handle;
-    CUDSS_CALL_AND_CHECK(cudssCreate(&cudss_handle), dss_status, "cudssCreateHandle B");
+    cudssHandle_t cudss_handle_b, cudss_handle_bt;
+    CUDSS_CALL_AND_CHECK(cudssCreate(&cudss_handle_b), "cudssCreateHandle B");
+    CUDSS_CALL_AND_CHECK(cudssCreate(&cudss_handle_bt), "cudssCreateHandle B_T");
     cudssConfig_t cudss_config;
-    CUDSS_CALL_AND_CHECK(cudssConfigCreate(&cudss_config), dss_status, "cudssCreateConfig B");
+    CUDSS_CALL_AND_CHECK(cudssConfigCreate(&cudss_config), "cudssCreateConfig");
+    i_t use_matching = 1;
+    CUDSS_CALL_AND_CHECK(
+        cudssConfigSet(cudss_config, CUDSS_CONFIG_USE_MATCHING, &use_matching, sizeof(i_t)),
+        "cudssConfigSet USE_MATCHING");
+
+    // cublasHandle_t cublas_handle;
+    // CUBLAS_CALL_AND_CHECK(cublasCreate(&cublas_handle), "cublasCreate");
+    // cusparseHandle_t cusparse_handle;
+    // CUSPARSE_CALL_AND_CHECK(cusparseCreate(&cusparse_handle), "cusparseCreate");
+    // cudssStatus_t dss_status = CUDSS_STATUS_SUCCESS;
+    // cudssHandle_t cudss_handle;
+    // CUDSS_CALL_AND_CHECK(cudssCreate(&cudss_handle), "cudssCreateHandle B");
+    // cudssConfig_t cudss_config;
+    // CUDSS_CALL_AND_CHECK(cudssConfigCreate(&cudss_config), "cudssCreateConfig B");
 
     // Move A to device
     i_t *d_A_col_ptr;
@@ -830,12 +852,12 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
 
     // Create dense vectors for eta updates
     // TODO: remove once we have dense sparse mv on device
-    f_t *eta_b_old, *eta_b_new, *eta_v, *eta_c, *eta_d;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_b_old, m * sizeof(f_t)), "cudaMalloc eta_b_old");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_b_new, m * sizeof(f_t)), "cudaMalloc eta_b_new");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_v, m * sizeof(f_t)), "cudaMalloc eta_v");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_c, m * sizeof(f_t)), "cudaMalloc eta_c");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_d, m * sizeof(f_t)), "cudaMalloc eta_d");
+    // f_t *eta_b_old, *eta_b_new, *eta_v, *eta_c, *eta_d;
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&eta_b_old, m * sizeof(f_t)), "cudaMalloc eta_b_old");
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&eta_b_new, m * sizeof(f_t)), "cudaMalloc eta_b_new");
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&eta_v, m * sizeof(f_t)), "cudaMalloc eta_v");
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&eta_c, m * sizeof(f_t)), "cudaMalloc eta_c");
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&eta_d, m * sizeof(f_t)), "cudaMalloc eta_d");
 
     // Compute Moore-Penrose pseudo-inverse of B
     i_t *d_B_row_ptr;
@@ -851,12 +873,33 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_row_ptr, (m + 1) * sizeof(i_t)),
                         "cudaMalloc d_Bt_row_ptr");
 
-    f_t *d_B_pinv;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
-    phase2_cu::compute_inverse<i_t, f_t>(cusparse_handle, cudss_handle, cudss_config, m, n,
-                                         d_A_col_ptr, d_A_row_ind, d_A_values, d_B_row_ptr,
-                                         d_B_col_ind, d_B_values, d_Bt_row_ptr, d_Bt_col_ind,
-                                         d_Bt_values, basic_list, d_B_pinv, nz_B, nz_Bt);
+    // f_t *d_B_pinv;
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
+    // phase2_cu::compute_inverse<i_t, f_t>(cusparse_handle, cudss_handle, cudss_config, m, n,
+    //                                      d_A_col_ptr, d_A_row_ind, d_A_values, d_B_row_ptr,
+    //                                      d_B_col_ind, d_B_values, d_Bt_row_ptr, d_Bt_col_ind,
+    //                                      d_Bt_values, basic_list, d_B_pinv, nz_B, nz_Bt);
+    cudaStream_t stream1, stream2;
+    CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream1), "cudaStreamCreate stream1");
+    CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream2), "cudaStreamCreate stream2");
+    i_t *d_basic_list;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_basic_list, m * sizeof(i_t)), "cudaMalloc d_basic_list");
+    CUDA_CALL_AND_CHECK(
+        cudaMemcpy(d_basic_list, basic_list.data(), m * sizeof(i_t), cudaMemcpyHostToDevice),
+        "cudaMemcpy basic_list to d_basic_list");
+    phase2_cu::build_basis_and_basis_transpose_on_device(
+        m, d_A_col_ptr, d_A_row_ind, d_A_values, d_basic_list, d_B_row_ptr, d_B_col_ind, d_B_values,
+        d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, nz_B, nz_Bt, stream1, stream2);
+    CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream1), "cudaStreamDestroy stream1");
+    CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream2), "cudaStreamDestroy stream2");
+
+    cudssMatrix_t d_B_matrix_cudss, d_Bt_matrix_cudss;
+    cudssData_t solverData_b, solverData_bt;
+    phase2_cu::LU_factorization<i_t, f_t>(cudss_handle_b, cudss_config, m, d_B_row_ptr, d_B_col_ind,
+                                          d_B_values, solverData_b, d_B_matrix_cudss, nz_B);
+    phase2_cu::LU_factorization<i_t, f_t>(cudss_handle_bt, cudss_config, m, d_Bt_row_ptr,
+                                          d_Bt_col_ind, d_Bt_values, solverData_bt,
+                                          d_Bt_matrix_cudss, nz_Bt);
 
     if (toc(start_time) > settings.time_limit) {
         return dual::status_t::TIME_LIMIT;
@@ -868,7 +911,83 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     }
 
     // Solve B'*y = cB
-    phase2_cu::pinv_solve(cublas_handle, d_B_pinv, c_basic, y, m, true);
+    // phase2_cu::pinv_solve(cublas_handle, d_B_pinv, c_basic, y, m, true);
+    phase2::LU_solve(cudss_handle_bt, cudss_config, solverData_bt, d_Bt_matrix_cudss, c_basic, y,
+                     m);
+    // // Print the first 10 values of y
+    // settings.log.printf("Initial dual solution y (first 10 values):\n");
+    // for (i_t i = 0; i < std::min(m, m); ++i) {
+    //     settings.log.printf("y[%d] = %.6f\n", i, y[i]);
+    // }
+
+    // // Testing cuDSS
+    // cudssHandle_t cudss_handle_test;
+    // CUDSS_CALL_AND_CHECK(cudssCreate(&cudss_handle_test), "cudssCreateHandle test");
+    // cudssConfig_t cudss_config_test;
+    // CUDSS_CALL_AND_CHECK(cudssConfigCreate(&cudss_config_test), "cudssCreateConfig test");
+    // i_t use_matching = 1;
+    // CUDSS_CALL_AND_CHECK(
+    //     cudssConfigSet(cudss_config_test, CUDSS_CONFIG_USE_MATCHING, &use_matching, 4),
+    //     "cudssConfigSet USE_MATCHING test");
+    // cudssData_t solverData_test;
+    // CUDSS_CALL_AND_CHECK(cudssDataCreate(cudss_handle_test, &solverData_test),
+    //                      "cudssCreateData test");
+    // cudssMatrix_t d_Bt_matrix_cudss;
+    // CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(&d_Bt_matrix_cudss, m, m, nz_Bt, d_Bt_row_ptr,
+    // NULL,
+    //                                           d_Bt_col_ind, d_Bt_values, CUDA_R_32I, CUDA_R_64F,
+    //                                           CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL,
+    //                                           CUDSS_BASE_ZERO),
+    //                      "cudssMatrixCreateCsr for B_T test");
+    // cudssMatrix_t d_y_matrix_cudss, d_cB_matrix_cudss;
+    // CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle_test,
+    //                                   CUDSS_PHASE_ANALYSIS | CUDSS_PHASE_FACTORIZATION,
+    //                                   cudss_config_test, solverData_test, d_Bt_matrix_cudss,
+    //                                   d_y_matrix_cudss, d_cB_matrix_cudss),
+    //                      "cudssExecute Analysis/Factorization for B_T test");
+    // f_t *d_y, *d_cB;
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&d_y, m * sizeof(f_t)), "cudaMalloc d_y test");
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&d_cB, m * sizeof(f_t)), "cudaMalloc d_cB test");
+    // CUDA_CALL_AND_CHECK(cudaMemcpy(d_cB, c_basic.data(), m * sizeof(f_t),
+    // cudaMemcpyHostToDevice),
+    //                     "cudaMemcpy c_basic to d_cB test");
+    // CUDA_CALL_AND_CHECK(cudaMemset(d_y, 0, m * sizeof(f_t)), "cudaMemset d_y to zero test");
+    // CUDSS_CALL_AND_CHECK(
+    //     cudssMatrixCreateDn(&d_cB_matrix_cudss, m, 1, m, d_cB, CUDA_R_64F,
+    //     CUDSS_LAYOUT_COL_MAJOR), "cudssMatrixCreateDn for cB test");
+    // CUDSS_CALL_AND_CHECK(
+    //     cudssMatrixCreateDn(&d_y_matrix_cudss, m, 1, m, d_y, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+    //     "cudssMatrixCreateDn for y test");
+
+    // // CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle_test,
+    // //                                   CUDSS_PHASE_ANALYSIS |
+    // //                                   CUDSS_PHASE_FACTORIZATION,
+    // //                                   cudss_config_test, solverData_test,
+    // //                                   d_Bt_matrix_cudss, d_y_matrix_cudss,
+    // //                                   d_cB_matrix_cudss),
+    // //                      dss_status, "cudssExecute Analysis/Factorization
+    // //                      for B_T test");
+
+    // CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle_test, CUDSS_PHASE_SOLVE, cudss_config_test,
+    //                                   solverData_test, d_Bt_matrix_cudss, d_y_matrix_cudss,
+    //                                   d_cB_matrix_cudss),
+    //                      "cudssExecute Solve for B_T test");
+    // CUDA_CALL_AND_CHECK(cudaMemcpy(y.data(), d_y, m * sizeof(f_t), cudaMemcpyDeviceToHost),
+    //                     "cudaMemcpy d_y to y test");
+    // // cuDSS cleanup test
+    // CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_Bt_matrix_cudss),
+    //                      "cudssMatrixDestroy B_T test");
+    // CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_y_matrix_cudss),
+    //                      "cudssMatrixDestroy y test");
+    // CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_cB_matrix_cudss),
+    //                      "cudssMatrixDestroy cB test");
+    // CUDSS_CALL_AND_CHECK(cudssDataDestroy(cudss_handle_test, solverData_test),
+    //                      "cudssDataDestroy B_T test");
+    // CUDSS_CALL_AND_CHECK(cudssConfigDestroy(cudss_config_test),
+    //                      "cudssConfigDestroy test");
+    // CUDSS_CALL_AND_CHECK(cudssDestroy(cudss_handle_test), "cudssDestroyHandle test");
+    // CUDA_CALL_AND_CHECK(cudaFree(d_y), "cudaFree d_y test");
+    // CUDA_CALL_AND_CHECK(cudaFree(d_cB), "cudaFree d_cB test");
 
     if (toc(start_time) > settings.time_limit) {
         return dual::status_t::TIME_LIMIT;
@@ -890,8 +1009,11 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         }
     }
 
-    phase2::compute_primal_variables(cublas_handle, d_B_pinv, lp.rhs, lp.A, basic_list,
-                                     nonbasic_list, settings.tight_tol, x);
+    // phase2::compute_primal_variables(cublas_handle, d_B_pinv, lp.rhs, lp.A, basic_list,
+    //                                  nonbasic_list, settings.tight_tol, x);
+    phase2::compute_primal_variables(cudss_handle_b, cudss_config, solverData_b, d_B_matrix_cudss,
+                                     lp.rhs, lp.A, basic_list, nonbasic_list, settings.tight_tol,
+                                     x);
 
     if (toc(start_time) > settings.time_limit) {
         return dual::status_t::TIME_LIMIT;
@@ -904,9 +1026,12 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                                                                     delta_y_steepest_edge);
         } else {
             std::fill(delta_y_steepest_edge.begin(), delta_y_steepest_edge.end(), -1);
-            if (phase2::initialize_steepest_edge_norms(lp, settings, start_time, basic_list,
-                                                       cublas_handle, d_B_pinv,
-                                                       delta_y_steepest_edge) == -1) {
+            // if (phase2::initialize_steepest_edge_norms(lp, settings, start_time, basic_list,
+            //                                            cublas_handle, d_B_pinv,
+            //                                            delta_y_steepest_edge) == -1) {
+            if (phase2::initialize_steepest_edge_norms(
+                    lp, settings, start_time, basic_list, cudss_handle_bt, cudss_config,
+                    solverData_bt, d_Bt_matrix_cudss, delta_y_steepest_edge) == -1) {
                 return dual::status_t::TIME_LIMIT;
             }
         }
@@ -916,7 +1041,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     }
 
     if (phase == 2) {
-        settings.log.printf(" Iter     Objective           Num Inf.  Sum Inf.     Perturb  Time\n");
+        settings.log.printf(" Iter     Objective           Num Inf.  Sum Inf. "
+                            "    Perturb  Time\n");
     }
 
     const i_t iter_limit = settings.iteration_limit;
@@ -973,9 +1099,13 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         }
         timers.pricing_time += timers.stop_timer();
         if (leaving_index == -1) {
-            phase2::prepare_optimality(lp, settings, cublas_handle, d_B_pinv, objective, basic_list,
-                                       nonbasic_list, vstatus, phase, start_time, max_val, iter, x,
-                                       y, z, sol);
+            // phase2::prepare_optimality(lp, settings, cublas_handle, d_B_pinv, objective,
+            // basic_list,
+            //                            nonbasic_list, vstatus, phase, start_time, max_val, iter,
+            //                            x, y, z, sol);
+            phase2::prepare_optimality(lp, settings, cudss_handle_bt, cudss_config, solverData_bt,
+                                       d_Bt_matrix_cudss, objective, basic_list, nonbasic_list,
+                                       vstatus, phase, start_time, max_val, iter, x, y, z, sol);
             status = dual::status_t::OPTIMAL;
             break;
         }
@@ -984,8 +1114,10 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         // BT*delta_y = -delta_zB = -sigma*ei
         timers.start_timer();
         sparse_vector_t<i_t, f_t> delta_y_sparse(m, 0);
-        phase2::compute_delta_y(cublas_handle, d_B_pinv, basic_leaving_index, direction,
-                                delta_y_sparse);
+        // phase2::compute_delta_y(cublas_handle, d_B_pinv, basic_leaving_index, direction,
+        //                         delta_y_sparse);
+        phase2::compute_delta_y(cudss_handle_bt, cudss_config, solverData_bt, d_Bt_matrix_cudss,
+                                basic_leaving_index, direction, delta_y_sparse);
         timers.btran_time += timers.stop_timer();
 
         const f_t steepest_edge_norm_check = delta_y_sparse.norm2_squared();
@@ -993,10 +1125,11 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             settings.steepest_edge_ratio * steepest_edge_norm_check) {
             constexpr bool verbose = false;
             if constexpr (verbose) {
-                settings.log.printf(
-                    "iteration restart due to steepest edge. Leaving %d. Actual %.2e "
-                    "from update %.2e\n",
-                    leaving_index, steepest_edge_norm_check, delta_y_steepest_edge[leaving_index]);
+                settings.log.printf("iteration restart due to steepest edge. "
+                                    "Leaving %d. Actual %.2e "
+                                    "from update %.2e\n",
+                                    leaving_index, steepest_edge_norm_check,
+                                    delta_y_steepest_edge[leaving_index]);
             }
             delta_y_steepest_edge[leaving_index] = steepest_edge_norm_check;
             continue;
@@ -1067,9 +1200,12 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                 // Try to remove perturbation
                 std::vector<f_t> unperturbed_y(m);
                 std::vector<f_t> unperturbed_z(n);
-                phase2::compute_dual_solution_from_basis(lp, cublas_handle, d_B_pinv, basic_list,
-                                                         nonbasic_list, unperturbed_y,
-                                                         unperturbed_z);
+                // phase2::compute_dual_solution_from_basis(lp, cublas_handle, d_B_pinv, basic_list,
+                //                                          nonbasic_list, unperturbed_y,
+                //                                          unperturbed_z);
+                phase2::compute_dual_solution_from_basis(
+                    lp, cudss_handle_bt, cudss_config, solverData_bt, d_Bt_matrix_cudss, basic_list,
+                    nonbasic_list, unperturbed_y, unperturbed_z);
                 {
                     const f_t dual_infeas =
                         phase2::dual_infeasibility(lp, settings, vstatus, unperturbed_z,
@@ -1083,9 +1219,12 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                         perturbation = 0.0;
 
                         std::vector<f_t> unperturbed_x(n);
-                        phase2::compute_primal_solution_from_basis(lp, cublas_handle, d_B_pinv,
-                                                                   basic_list, nonbasic_list,
-                                                                   vstatus, unperturbed_x);
+                        // phase2::compute_primal_solution_from_basis(lp, cublas_handle, d_B_pinv,
+                        //                                            basic_list, nonbasic_list,
+                        //                                            vstatus, unperturbed_x);
+                        phase2::compute_primal_solution_from_basis(
+                            lp, cudss_handle_b, cudss_config, solverData_b, d_B_matrix_cudss,
+                            basic_list, nonbasic_list, vstatus, unperturbed_x);
                         x = unperturbed_x;
                         primal_infeasibility = phase2::compute_initial_primal_infeasibilities(
                             lp, settings, basic_list, x, squared_infeasibilities,
@@ -1094,28 +1233,36 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                                             primal_infeasibility);
 
                         objective = lp.objective;
-                        // Need to reset the objective value, since we have recomputed x
+                        // Need to reset the objective value, since we have
+                        // recomputed x
                         obj = phase2::compute_perturbed_objective(objective, x);
                         if (dual_infeas <= settings.dual_tol &&
                             primal_infeasibility <= settings.primal_tol) {
-                            phase2::prepare_optimality(lp, settings, cublas_handle, d_B_pinv,
-                                                       objective, basic_list, nonbasic_list,
-                                                       vstatus, phase, start_time, max_val, iter, x,
-                                                       y, z, sol);
+                            // phase2::prepare_optimality(lp, settings, cublas_handle, d_B_pinv,
+                            //                            objective, basic_list, nonbasic_list,
+                            //                            vstatus, phase, start_time, max_val, iter,
+                            //                            x, y, z, sol);
+                            phase2::prepare_optimality(lp, settings, cudss_handle_bt, cudss_config,
+                                                       solverData_bt, d_Bt_matrix_cudss, objective,
+                                                       basic_list, nonbasic_list, vstatus, phase,
+                                                       start_time, max_val, iter, x, y, z, sol);
                             status = dual::status_t::OPTIMAL;
                             break;
                         }
-                        settings.log.printf(
-                            "Continuing with perturbation removed and steepest edge norms reset\n");
+                        settings.log.printf("Continuing with perturbation removed and "
+                                            "steepest edge norms reset\n");
                         // Clear delta_z before restarting the iteration
                         phase2::clear_delta_z(entering_index, leaving_index, delta_z_mark,
                                               delta_z_indices, delta_z);
                         continue;
                     } else {
                         std::vector<f_t> unperturbed_x(n);
-                        phase2::compute_primal_solution_from_basis(lp, cublas_handle, d_B_pinv,
-                                                                   basic_list, nonbasic_list,
-                                                                   vstatus, unperturbed_x);
+                        // phase2::compute_primal_solution_from_basis(lp, cublas_handle, d_B_pinv,
+                        //                                            basic_list, nonbasic_list,
+                        //                                            vstatus, unperturbed_x);
+                        phase2::compute_primal_solution_from_basis(
+                            lp, cudss_handle_b, cudss_config, solverData_b, d_B_matrix_cudss,
+                            basic_list, nonbasic_list, vstatus, unperturbed_x);
                         x = unperturbed_x;
                         primal_infeasibility = phase2::compute_initial_primal_infeasibilities(
                             lp, settings, basic_list, x, squared_infeasibilities,
@@ -1126,10 +1273,14 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
 
                         if (primal_infeasibility <= settings.primal_tol &&
                             orig_dual_infeas <= settings.dual_tol) {
-                            phase2::prepare_optimality(lp, settings, cublas_handle, d_B_pinv,
-                                                       objective, basic_list, nonbasic_list,
-                                                       vstatus, phase, start_time, max_val, iter, x,
-                                                       y, z, sol);
+                            // phase2::prepare_optimality(lp, settings, cublas_handle, d_B_pinv,
+                            //                            objective, basic_list, nonbasic_list,
+                            //                            vstatus, phase, start_time, max_val, iter,
+                            //                            x, y, z, sol);
+                            phase2::prepare_optimality(lp, settings, cudss_handle_bt, cudss_config,
+                                                       solverData_bt, d_Bt_matrix_cudss, objective,
+                                                       basic_list, nonbasic_list, vstatus, phase,
+                                                       start_time, max_val, iter, x, y, z, sol);
                             status = dual::status_t::OPTIMAL;
                             break;
                         }
@@ -1146,7 +1297,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             settings.log.printf("Primal infeasibility %e\n", primal_inf);
             settings.log.printf("Steepest edge %e\n", max_val);
             if (dual_infeas > settings.dual_tol) {
-                settings.log.printf("Numerical issues encountered. No entering variable found with "
+                settings.log.printf("Numerical issues encountered. No "
+                                    "entering variable found with "
                                     "large infeasibility.\n");
                 return dual::status_t::NUMERICAL;
             }
@@ -1172,16 +1324,23 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         sparse_vector_t<i_t, f_t> delta_xB_0_sparse(m, 0);
         if (num_flipped > 0) {
             timers.start_timer();
-            phase2::adjust_for_flips(cublas_handle, d_B_pinv, basic_list, delta_z_indices,
-                                     atilde_index, atilde, atilde_mark, delta_xB_0_sparse,
-                                     delta_x_flip, x);
+            // phase2::adjust_for_flips(cublas_handle, d_B_pinv, basic_list, delta_z_indices,
+            //                          atilde_index, atilde, atilde_mark, delta_xB_0_sparse,
+            //                          delta_x_flip, x);
+            phase2::adjust_for_flips(cudss_handle_b, cudss_config, solverData_b, d_B_matrix_cudss,
+                                     basic_list, delta_z_indices, atilde_index, atilde, atilde_mark,
+                                     delta_xB_0_sparse, delta_x_flip, x);
             timers.ftran_time += timers.stop_timer();
         }
 
         timers.start_timer();
         sparse_vector_t<i_t, f_t> scaled_delta_xB_sparse(m, 0);
         sparse_vector_t<i_t, f_t> rhs_sparse(lp.A, entering_index);
-        if (phase2::compute_delta_x(lp, cublas_handle, d_B_pinv, entering_index, leaving_index,
+        // if (phase2::compute_delta_x(lp, cublas_handle, d_B_pinv, entering_index, leaving_index,
+        //                             basic_leaving_index, direction, basic_list, delta_x_flip,
+        //                             rhs_sparse, x, scaled_delta_xB_sparse, delta_x) == -1) {
+        if (phase2::compute_delta_x(lp, cudss_handle_b, cudss_config, solverData_b,
+                                    d_B_matrix_cudss, entering_index, leaving_index,
                                     basic_leaving_index, direction, basic_list, delta_x_flip,
                                     rhs_sparse, x, scaled_delta_xB_sparse, delta_x) == -1) {
             settings.log.printf("Failed to compute delta_x. Iter %d\n", iter);
@@ -1191,10 +1350,14 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         timers.ftran_time += timers.stop_timer();
 
         timers.start_timer();
+        // const i_t steepest_edge_status = phase2::update_steepest_edge_norms(
+        //     settings, basic_list, cublas_handle, d_B_pinv, direction, delta_y_sparse,
+        //     steepest_edge_norm_check, scaled_delta_xB_sparse, basic_leaving_index,
+        //     entering_index, v, delta_y_steepest_edge);
         const i_t steepest_edge_status = phase2::update_steepest_edge_norms(
-            settings, basic_list, cublas_handle, d_B_pinv, direction, delta_y_sparse,
-            steepest_edge_norm_check, scaled_delta_xB_sparse, basic_leaving_index, entering_index,
-            v, delta_y_steepest_edge);
+            settings, basic_list, cudss_handle_b, cudss_config, solverData_b, d_B_matrix_cudss,
+            direction, delta_y_sparse, steepest_edge_norm_check, scaled_delta_xB_sparse,
+            basic_leaving_index, entering_index, v, delta_y_steepest_edge);
         assert(steepest_edge_status == 0);
         timers.se_norms_time += timers.stop_timer();
 
@@ -1205,9 +1368,10 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         timers.vector_time += timers.stop_timer();
 
         timers.start_timer();
-        // TODO(CMM): Do I also need to update the objective due to the bound flips?
-        // TODO(CMM): I'm using the unperturbed objective here, should this be the perturbed
-        // objective?
+        // TODO(CMM): Do I also need to update the objective due to the bound
+        // flips?
+        // TODO(CMM): I'm using the unperturbed objective here, should this be
+        // the perturbed objective?
         phase2::update_objective(basic_list, scaled_delta_xB_sparse.i, lp.objective, delta_x,
                                  entering_index, obj);
         timers.objective_time += timers.stop_timer();
@@ -1256,94 +1420,54 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
 
         timers.start_timer();
         // Refactor or update the basis factorization
-        bool should_refactor = (iter + 1) % settings.refactor_frequency == 0;
+        // bool should_refactor = (iter + 1) % settings.refactor_frequency == 0;
 
-        if (!should_refactor) {
-            if (settings.profile) {
-                settings.timer.start("Inverse Update 1");
-            }
+        // Free old B and Bt
+        CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
+        CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
+        CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
+        CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
+        // Destroy cuDSS matrices
+        CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_B_matrix_cudss),
+                             "cudssMatrixDestroy B_matrix_cudss");
+        CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_Bt_matrix_cudss),
+                             "cudssMatrixDestroy Bt_matrix_cudss");
+        CUDSS_CALL_AND_CHECK(cudssDataDestroy(cudss_handle_b, solverData_b),
+                             "cudssDataDestroy solveData_b");
+        CUDSS_CALL_AND_CHECK(cudssDataDestroy(cudss_handle_bt, solverData_bt),
+                             "cudssDataDestroy solveData_bt");
 
-            should_refactor = !phase2_cu::eta_update_inverse(
-                cublas_handle, m, d_B_pinv, eta_b_old, eta_b_new, eta_v, eta_c, eta_d, d_A_col_ptr,
-                d_A_row_ind, d_A_values, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values,
-                basic_leaving_index, entering_index);
+        // Recreate cuDSS data and matrices
+        i_t *d_basic_list;
+        CUDA_CALL_AND_CHECK(cudaMalloc(&d_basic_list, m * sizeof(i_t)), "cudaMalloc d_basic_list");
+        CUDA_CALL_AND_CHECK(
+            cudaMemcpy(d_basic_list, basic_list.data(), m * sizeof(i_t), cudaMemcpyHostToDevice),
+            "cudaMemcpy to d_basic_list");
+        cudaStream_t stream1, stream2;
+        CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream1), "cudaStreamCreate stream1");
+        CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream2), "cudaStreamCreate stream2");
+        phase2_cu::build_basis_and_basis_transpose_on_device<i_t, f_t>(
+            m, d_A_col_ptr, d_A_row_ind, d_A_values, d_basic_list, d_B_row_ptr, d_B_col_ind,
+            d_B_values, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, nz_B, nz_Bt, stream1, stream2);
+        CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(), "cudaDeviceSynchronize after build B and Bt");
+        CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream1), "cudaStreamDestroy stream1");
+        CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream2), "cudaStreamDestroy stream2");
 
-            if (settings.profile) {
-                settings.timer.stop("Inverse Update 1");
-            }
-        }
-
-        // Free old B and Bt and recompute
-        // CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
-        // CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
-        // CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
-        // CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
-
-        if (!should_refactor) {
-            if (settings.profile) {
-                settings.timer.start("Inverse Update 2");
-            }
-
-            // Move basic list to device
-            // TODO: as above consider keeping this on device
-            i_t *d_basic_list;
-            CUDA_CALL_AND_CHECK(cudaMalloc(&d_basic_list, m * sizeof(i_t)),
-                                "cudaMalloc d_basic_list");
-            CUDA_CALL_AND_CHECK(cudaMemcpy(d_basic_list, basic_list.data(), m * sizeof(i_t),
-                                           cudaMemcpyHostToDevice),
-                                "cudaMemcpy to d_basic_list");
-
-            // TODO: It's probably not smart to rebuild B and Bt from scratch every time
-            // Instead use a 95% threshold (or higher) to determine the size per row to
-            // allocate s.t. we don't have to realloc every time
-            cudaStream_t stream1, stream2;
-            CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream1), "cudaStreamCreate stream1");
-            CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream2), "cudaStreamCreate stream2");
-            phase2_cu::build_basis_and_basis_transpose_on_device<i_t, f_t>(
-                m, d_A_col_ptr, d_A_row_ind, d_A_values, d_basic_list, d_B_row_ptr, d_B_col_ind,
-                d_B_values, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, nz_B, nz_Bt, stream1, stream2);
-
-            CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(),
-                                "cudaDeviceSynchronize after build B and Bt");
-            CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream1), "cudaStreamDestroy stream1");
-            CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream2), "cudaStreamDestroy stream2");
-
-            if (settings.profile) {
-                settings.timer.stop("Inverse Update 2");
-            }
-        }
-
-        if (should_refactor) {
-            if (settings.profile) {
-                settings.timer.start("Inverse Refactorizaton");
-            }
-
-            // Free old B and Bt
-            CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ind), "cudaFree d_B_col_ind");
-            CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
-            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_col_ind), "cudaFree d_Bt_col_ind");
-            CUDA_CALL_AND_CHECK(cudaFree(d_Bt_values), "cudaFree d_Bt_values");
-
-            // Recompute d_B_pinv
-            phase2_cu::compute_inverse<i_t, f_t>(
-                cusparse_handle, cudss_handle, cudss_config, m, n, d_A_col_ptr, d_A_row_ind,
-                d_A_values, d_B_row_ptr, d_B_col_ind, d_B_values, d_Bt_row_ptr, d_Bt_col_ind,
-                d_Bt_values, basic_list, d_B_pinv, nz_B, nz_Bt);
-
-            phase2::reset_basis_mark(basic_list, nonbasic_list, basic_mark, nonbasic_mark);
-            phase2::compute_initial_primal_infeasibilities(
-                lp, settings, basic_list, x, squared_infeasibilities, infeasibility_indices);
-
-            if (settings.profile) {
-                settings.timer.stop("Inverse Refactorizaton");
-            }
-        }
+        phase2_cu::LU_factorization<i_t, f_t>(cudss_handle_b, cudss_config, m, d_B_row_ptr,
+                                              d_B_col_ind, d_B_values, solverData_b,
+                                              d_B_matrix_cudss, nz_B);
+        phase2_cu::LU_factorization<i_t, f_t>(cudss_handle_bt, cudss_config, m, d_Bt_row_ptr,
+                                              d_Bt_col_ind, d_Bt_values, solverData_bt,
+                                              d_Bt_matrix_cudss, nz_Bt);
         timers.lu_update_time += timers.stop_timer();
 
         timers.start_timer();
-        phase2::compute_steepest_edge_norm_entering(settings, m, cublas_handle, d_B_pinv,
-                                                    basic_leaving_index, entering_index,
-                                                    delta_y_steepest_edge);
+        // phase2::compute_steepest_edge_norm_entering(settings, m, cublas_handle, d_B_pinv,
+        //                                             basic_leaving_index, entering_index,
+        //                                             delta_y_steepest_edge);
+        phase2::compute_steepest_edge_norm_entering(
+            settings, m, cudss_handle_bt, cudss_config, solverData_bt, d_Bt_matrix_cudss,
+            basic_leaving_index, entering_index, delta_y_steepest_edge);
         timers.se_entering_time += timers.stop_timer();
 
         iter++;
@@ -1356,8 +1480,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         if ((iter - start_iter) < settings.first_iteration_log ||
             (iter % settings.iteration_log_frequency) == 0) {
             if (phase == 1 && iter == 1) {
-                settings.log.printf(
-                    " Iter     Objective           Num Inf.  Sum Inf.     Perturb  Time\n");
+                settings.log.printf(" Iter     Objective           Num Inf.  "
+                                    "Sum Inf.     Perturb  Time\n");
             }
             settings.log.printf("%5d %+.16e %7d %.8e %.2e %.2f\n", iter,
                                 compute_user_objective(lp, obj), infeasibility_indices.size(),
@@ -1393,11 +1517,21 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDA_CALL_AND_CHECK(cudaFree(d_A_values), "cudaFree d_A_values");
     CUDA_CALL_AND_CHECK(cudaFree(d_B_row_ptr), "cudaFree d_B_row_ptr");
     CUDA_CALL_AND_CHECK(cudaFree(d_Bt_row_ptr), "cudaFree d_Bt_row_ptr");
-    CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv), "cudaFree d_D_pinv");
-    CUBLAS_CALL_AND_CHECK(cublasDestroy(cublas_handle), "cublasDestroy");
-    CUSPARSE_CALL_AND_CHECK(cusparseDestroy(cusparse_handle), "cusparseDestroy");
-    CUDSS_CALL_AND_CHECK(cudssConfigDestroy(cudss_config), dss_status, "cudssConfigDestroy B");
-    CUDSS_CALL_AND_CHECK(cudssDestroy(cudss_handle), dss_status, "cudssDestroyHandle B");
+    // CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv), "cudaFree d_D_pinv");
+    // CUBLAS_CALL_AND_CHECK(cublasDestroy(cublas_handle), "cublasDestroy");
+    // CUSPARSE_CALL_AND_CHECK(cusparseDestroy(cusparse_handle), "cusparseDestroy");
+    // CUDSS_CALL_AND_CHECK(cudssConfigDestroy(cudss_config), dss_status, "cudssConfigDestroy B");
+    // CUDSS_CALL_AND_CHECK(cudssDestroy(cudss_handle), dss_status, "cudssDestroyHandle B");
+    CUDSS_CALL_AND_CHECK(cudssDataDestroy(cudss_handle_b, solverData_b),
+                         "cudssDataDestroy solveData_b");
+    CUDSS_CALL_AND_CHECK(cudssDataDestroy(cudss_handle_bt, solverData_bt),
+                         "cudssDataDestroy solveData_bt");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_B_matrix_cudss), "cudssMatrixDestroy B_matrix_cudss");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_Bt_matrix_cudss),
+                         "cudssMatrixDestroy Bt_matrix_cudss");
+    CUDSS_CALL_AND_CHECK(cudssConfigDestroy(cudss_config), "cudssConfigDestroy");
+    CUDSS_CALL_AND_CHECK(cudssDestroy(cudss_handle_b), "cudssDestroyHandle B");
+    CUDSS_CALL_AND_CHECK(cudssDestroy(cudss_handle_bt), "cudssDestroyHandle Bt");
 
     return status;
 }
