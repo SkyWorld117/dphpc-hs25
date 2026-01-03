@@ -30,9 +30,9 @@
         }                                                                                          \
     } while (0);
 
-#define CUDSS_CALL_AND_CHECK(call, status, msg)                                                    \
+#define CUDSS_CALL_AND_CHECK(call, msg)                                                            \
     do {                                                                                           \
-        status = call;                                                                             \
+        cudssStatus_t status = call;                                                               \
         if (status != CUDSS_STATUS_SUCCESS) {                                                      \
             printf("CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n",        \
                    status);                                                                        \

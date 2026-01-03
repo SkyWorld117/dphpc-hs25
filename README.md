@@ -4,6 +4,7 @@
 - [x] implement using B_pinv as solver
 - [x] implement assembling B_T, B_T dense on device
 - [x] eta updates for B_pinv
+- [ ] storage efficient implementation of solvers
 - [ ] investigate better ways to store B, Bt and to compute BtB
 
 ## Sophia
@@ -19,6 +20,7 @@
 ## Not assigned
 - [ ] investigate the tradeoff of keeping basic_list on device vs copying it every time
 - [ ] move more data structures to device to reduce data transfer overhead (more kernels for various steps)
+- [ ] implement more analysis tools for optimal kernel launching
 
 # C++ Modules
 
