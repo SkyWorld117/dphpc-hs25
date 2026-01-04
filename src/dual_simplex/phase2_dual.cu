@@ -1136,6 +1136,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_col_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_B_col_ptr");
 
     f_t *d_B_pinv;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_B_pinv");
     i_t *d_B_pinv_col_ptr;
     i_t *d_B_pinv_row_ind;
     f_t *d_B_pinv_values;
@@ -1619,8 +1620,6 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                         h_B_pinv_dense[col * m + row] = val; // Column-major
                     }
                 }
-                CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)),
-                                    "cudaMalloc d_B_pinv");
                 CUDA_CALL_AND_CHECK(cudaMemcpy(d_B_pinv, h_B_pinv_dense.data(), m * m * sizeof(f_t),
                                                cudaMemcpyHostToDevice),
                                     "cudaMemcpy h_B_pinv_dense to d_B_pinv");
@@ -1694,8 +1693,6 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                         h_B_pinv_dense[col * m + row] = val; // Column-major
                     }
                 }
-                CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)),
-                                    "cudaMalloc d_B_pinv");
                 CUDA_CALL_AND_CHECK(cudaMemcpy(d_B_pinv, h_B_pinv_dense.data(), m * m * sizeof(f_t),
                                                cudaMemcpyHostToDevice),
                                     "cudaMemcpy h_B_pinv_dense to d_B_pinv");
