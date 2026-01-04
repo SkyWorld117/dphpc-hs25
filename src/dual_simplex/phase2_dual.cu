@@ -1233,6 +1233,14 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDSS_CALL_AND_CHECK(cudssCreate(&cudss_handle), "cudssCreateHandle B");
     cudssConfig_t cudss_config;
     CUDSS_CALL_AND_CHECK(cudssConfigCreate(&cudss_config), "cudssCreateConfig B");
+    i_t use_matching = 1;
+    CUDSS_CALL_AND_CHECK(
+        cudssConfigSet(cudss_config, CUDSS_CONFIG_USE_MATCHING, &use_matching, sizeof(i_t)),
+        "cudssConfigSetParameter ENABLE_MATCHINGS B");
+    cudssAlgType_t matching_alg = CUDSS_ALG_5;
+    CUDSS_CALL_AND_CHECK(
+        cudssConfigSet(cudss_config, CUDSS_CONFIG_MATCHING_ALG, &matching_alg, sizeof(cudssAlgType_t)),
+        "cudssConfigSetParameter MATCHING_ALG_TYPE B");
 
     // Create matrix representations
     cusparseSpMatDescr_t B_pinv_cusparse;
