@@ -124,7 +124,8 @@ __global__ void BtB_preprocess(i_t m, const i_t *__restrict__ d_B_col_ptr,
                                const i_t *__restrict__ d_B_row_ind,
                                const f_t *__restrict__ d_B_values, i_t *d_BtB_row_ptr) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m) return; // Parallelization over row
+    if (idx >= m)
+        return; // Parallelization over row
 
     for (i_t col = 0; col < m; ++col) {
         // Fix the index for symmetric matrix (ensuring the same floating point order)
@@ -165,7 +166,8 @@ __global__ void BtB_compute(i_t m, const i_t *__restrict__ d_B_col_ptr,
                             i_t *d_BtB_row_ptr, i_t *d_BtB_col_ind, f_t *d_BtB_values,
                             i_t *write_offsets) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m) return; // Parallelization over row
+    if (idx >= m)
+        return; // Parallelization over row
 
     for (i_t col = 0; col < m; ++col) {
         // Fix the index for symmetric matrix (ensuring the same floating point order)
@@ -230,7 +232,8 @@ template <typename i_t, typename f_t>
 __global__ void count_nnz_cols(i_t m, i_t num_cols, i_t col_start, const f_t *__restrict__ X_slice,
                                i_t *__restrict__ nnz_per_col) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_cols) return;
+    if (idx >= num_cols)
+        return;
 
     i_t col_idx = idx;
     for (i_t row_idx = 0; row_idx < m; ++row_idx) {
@@ -246,7 +249,8 @@ __global__ void fill_csc_cols(i_t m, i_t num_cols, i_t col_start, const f_t *__r
                               i_t *__restrict__ write_offsets, i_t *__restrict__ X_row_ind,
                               f_t *__restrict__ X_values) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_cols) return;
+    if (idx >= num_cols)
+        return;
 
     i_t col_idx = idx;
     for (i_t row_idx = 0; row_idx < m; ++row_idx) {
@@ -497,229 +501,250 @@ void compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_han
 }
 
 template <typename i_t, typename f_t>
-__global__ void fetch_row_as_dense_kernel(i_t m, i_t row_idx, const i_t *__restrict__ Bt_row_ptr,
-                                          const i_t *__restrict__ Bt_col_ind,
-                                          const f_t *__restrict__ Bt_values,
-                                          f_t *__restrict__ row_dense) {
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    i_t start = Bt_row_ptr[row_idx];
-    i_t end = Bt_row_ptr[row_idx + 1];
-
-    if (idx >= end - start)
-        return;
-
-    i_t col = Bt_col_ind[start + idx];
-    f_t val = Bt_values[start + idx];
-    row_dense[col] = val;
-}
-
-template <typename i_t, typename f_t>
-void fetch_row_as_dense(i_t m, i_t row_idx, const i_t *d_Bt_row_ptr, const i_t *d_Bt_col_ind,
-                        const f_t *d_Bt_values, f_t *h_row_dense, cudaStream_t stream) {
-    // Initialize to zero
-    CUDA_CALL_AND_CHECK(cudaMemset(h_row_dense, 0, m * sizeof(f_t)), "cudaMemset h_row_dense");
-    int block_size = 32;
-    int grid_size = (m + block_size - 1) / block_size;
-    fetch_row_as_dense_kernel<<<grid_size, block_size, 0, stream>>>(
-        m, row_idx, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values, h_row_dense);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "fetch_row_as_dense_kernel");
-}
-
-template <typename i_t, typename f_t>
-__global__ void fetch_column_as_dense_kernel(i_t m, i_t col_idx, const i_t *__restrict__ B_row_ptr,
-                                             const i_t *__restrict__ B_col_ind,
+__global__ void fetch_column_as_dense_kernel(i_t m, i_t col_idx, const i_t *__restrict__ B_col_ptr,
+                                             const i_t *__restrict__ B_row_ind,
                                              const f_t *__restrict__ B_values,
                                              f_t *__restrict__ col_dense) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    i_t start = B_row_ptr[col_idx];
-    i_t end = B_row_ptr[col_idx + 1];
+    i_t start = B_col_ptr[col_idx];
+    i_t end = B_col_ptr[col_idx + 1];
 
     if (idx >= end - start)
         return;
 
-    i_t row = B_col_ind[start + idx];
+    i_t row = B_row_ind[start + idx];
     f_t val = B_values[start + idx];
     col_dense[row] = val;
 }
 
 template <typename i_t, typename f_t>
-void fetch_column_as_dense(i_t m, i_t col_idx, const i_t *d_B_row_ptr, const i_t *d_B_col_ind,
-                           const f_t *d_B_values, f_t *h_col_dense, cudaStream_t stream) {
+void fetch_column_as_dense(i_t m, i_t col_idx, const i_t *d_B_col_ptr, const i_t *d_B_row_ind,
+                           const f_t *d_B_values, f_t *col_dense, cudaStream_t stream) {
     // Initialize to zero
-    CUDA_CALL_AND_CHECK(cudaMemset(h_col_dense, 0, m * sizeof(f_t)), "cudaMemset h_col_dense");
+    CUDA_CALL_AND_CHECK(cudaMemset(col_dense, 0, m * sizeof(f_t)), "cudaMemset col_dense");
     int block_size = 32;
     int grid_size = (m + block_size - 1) / block_size;
     fetch_column_as_dense_kernel<<<grid_size, block_size, 0, stream>>>(
-        m, col_idx, d_B_row_ptr, d_B_col_ind, d_B_values, h_col_dense);
+        m, col_idx, d_B_col_ptr, d_B_row_ind, d_B_values, col_dense);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "fetch_column_as_dense_kernel");
 }
 
 template <typename i_t, typename f_t>
-__global__ void get_vector_nnz(i_t m, const f_t *__restrict__ dense_vec, i_t *nnz) {
+__global__ void fetch_row_as_dense_kernel(i_t m, i_t row_idx, const i_t *__restrict__ B_col_ptr,
+                                          const i_t *__restrict__ B_row_ind,
+                                          const f_t *__restrict__ B_values,
+                                          f_t *__restrict__ row_dense) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m)
         return;
 
-    if (abs(dense_vec[idx]) > 1e-12) {
-        atomicAdd(nnz, 1);
+    i_t start = B_col_ptr[idx];
+    i_t end = B_col_ptr[idx + 1];
+    for (i_t i = start; i < end; ++i) {
+        i_t row = B_row_ind[i];
+        if (row == row_idx) {
+            f_t val = B_values[i];
+            row_dense[idx] = val;
+            break;
+        }
     }
 }
 
 template <typename i_t, typename f_t>
-__global__ void vector_dense2sparse(i_t m, const f_t *__restrict__ dense_vec, i_t *sparse_indices,
-                                    f_t *sparse_values, i_t *write_offset) {
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m)
-        return;
-
-    // Use atomic operations to handle concurrent writes
-    if (abs(dense_vec[idx]) > 1e-12) {
-        i_t write_pos = atomicAdd(write_offset, 1);
-        sparse_indices[write_pos] = idx;
-        sparse_values[write_pos] = dense_vec[idx];
-    }
+void fetch_row_as_dense(i_t m, i_t row_idx, const i_t *d_B_col_ptr, const i_t *d_B_row_ind,
+                        const f_t *d_B_values, f_t *row_dense, cudaStream_t stream) {
+    // Initialize to zero
+    CUDA_CALL_AND_CHECK(cudaMemset(row_dense, 0, m * sizeof(f_t)), "cudaMemset row_dense");
+    int block_size = 32;
+    int grid_size = (m + block_size - 1) / block_size;
+    fetch_row_as_dense_kernel<<<grid_size, block_size, 0, stream>>>(
+        m, row_idx, d_B_col_ptr, d_B_row_ind, d_B_values, row_dense);
+    CUDA_CALL_AND_CHECK(cudaGetLastError(), "fetch_row_as_dense_kernel");
 }
 
 template <typename i_t>
-__global__ void get_row_nnz(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
-                            const i_t *__restrict__ d_B_pinv_row_ind, i_t row_idx, i_t *nnz) {
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m)
-        return;
-
-    // Scan through column idx to find if row_idx exists
-    i_t col_start = d_B_pinv_col_ptr[idx];
-    i_t col_end = d_B_pinv_col_ptr[idx + 1];
-    for (i_t j = col_start; j < col_end; ++j) {
-        if (d_B_pinv_row_ind[j] == row_idx) {
-            atomicAdd(nnz, 1);
+__device__ i_t binary_search(i_t length, const i_t *__restrict__ arr, i_t target) {
+    i_t left = 0;
+    i_t right = length - 1;
+    i_t res = -1;
+    while (left <= right) {
+        i_t mid = left + (right - left) / 2;
+        if (arr[mid] == target) {
+            res = mid;
             break;
+        } else if (arr[mid] < target) {
+            left = mid + 1;
+        } else {
+            right = mid - 1;
         }
     }
+    return res;
 }
 
 template <typename i_t, typename f_t>
-__global__ void extract_sparse_row(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
-                                   const i_t *__restrict__ d_B_pinv_row_ind,
-                                   const f_t *__restrict__ d_B_pinv_values, i_t row_idx,
-                                   i_t *sparse_indices, f_t *sparse_values, i_t *write_offset) {
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m)
+__global__ void spmv_csc_kernel(i_t n, i_t m, const i_t *__restrict__ col_ptr,
+                                const i_t *__restrict__ row_ind, const f_t *__restrict__ values,
+                                const f_t *__restrict__ x, f_t *__restrict__ y, f_t alpha,
+                                f_t beta) {
+    // Compute y = alpha * A * x + beta * y where A is in CSC format
+    // Strategy: Each thread processes one column, performing scatter operation
+    // This is efficient when columns are relatively sparse and we have enough parallelism
+
+    i_t col_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col_idx >= n)
         return;
 
-    // Scan through column idx to find if row_idx exists
-    i_t col_start = d_B_pinv_col_ptr[idx];
-    i_t col_end = d_B_pinv_col_ptr[idx + 1];
-    for (i_t j = col_start; j < col_end; ++j) {
-        if (d_B_pinv_row_ind[j] == row_idx) {
-            i_t write_pos = atomicAdd(write_offset, 1);
-            sparse_indices[write_pos] = idx;
-            sparse_values[write_pos] = d_B_pinv_values[j];
-            break;
-        }
+    // Get the scaling factor for this column
+    f_t x_val = x[col_idx];
+    if (abs(x_val) < 1e-20)
+        return; // Skip zero columns to avoid unnecessary atomic operations
+
+    f_t scale = alpha * x_val;
+
+    // Iterate over non-zeros in this column and scatter to result
+    i_t col_start = col_ptr[col_idx];
+    i_t col_end = col_ptr[col_idx + 1];
+
+    for (i_t i = col_start; i < col_end; ++i) {
+        i_t row = row_ind[i];
+        f_t val = values[i];
+        // Use atomicAdd since multiple threads may write to the same output element
+        atomicAdd(&y[row], scale * val);
     }
 }
 
-template <typename i_t>
-__global__ void get_rank1_delta_nnz(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
-                                    const i_t *__restrict__ d_B_pinv_row_ind,
-                                    const i_t *__restrict__ d_vector_U_indices,
-                                    const i_t *__restrict__ d_vector_V_indices, const i_t nz_U,
-                                    const i_t nz_V, i_t *delta_nnz_per_col) {
-    // Assuming U @ V^T rank-1 update
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= nz_U * nz_V)
-        return;
-
-    i_t u_idx = idx / nz_V;
-    i_t v_idx = idx % nz_V;
-    i_t row_idx = d_vector_U_indices[u_idx];
-    i_t col_idx = d_vector_V_indices[v_idx];
-
-    // Try to find if (row_idx, col_idx) exists in B_pinv for the column col_idx
-    i_t col_start = d_B_pinv_col_ptr[col_idx];
-    i_t col_end = d_B_pinv_col_ptr[col_idx + 1];
-    bool found = false;
-    for (i_t j = col_start; j < col_end; ++j) {
-        if (d_B_pinv_row_ind[j] == row_idx) {
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        atomicAdd(&delta_nnz_per_col[col_idx], 1);
-    }
-}
-
-template <typename i_t, typename f_t>
-__global__ void rank1_preprocess(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
-                                 const i_t *__restrict__ d_B_pinv_row_ind,
-                                 const f_t *__restrict__ d_B_pinv_values, i_t *d_new_B_pinv_row_ind,
-                                 f_t *d_new_B_pinv_values, i_t *write_offsets) {
-    // Copy existing B_pinv into new B_pinv
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m)
-        return;
-
-    i_t col_start = d_B_pinv_col_ptr[idx];
-    i_t col_end = d_B_pinv_col_ptr[idx + 1];
-    for (i_t j = col_start; j < col_end; ++j) {
-        i_t i = write_offsets[idx] + (j - col_start);
-        d_new_B_pinv_row_ind[i] = d_B_pinv_row_ind[j];
-        d_new_B_pinv_values[i] = d_B_pinv_values[j];
-    }
-    write_offsets[idx] += (col_end - col_start);
-}
-
+// Alternative version: Process columns in chunks to reduce atomics
 template <typename i_t, typename f_t>
 __global__ void
-rank1_csc_update(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
-                 const i_t *__restrict__ d_B_pinv_row_ind, const f_t *__restrict__ d_B_pinv_values,
-                 const i_t *__restrict__ d_new_B_pinv_col_ptr, i_t *d_new_B_pinv_row_ind,
-                 f_t *d_new_B_pinv_values, i_t *d_vector_U_indices, f_t *d_vector_U_values,
-                 i_t *d_vector_V_indices, f_t *d_vector_V_values, i_t nz_U, i_t nz_V,
-                 i_t *write_offsets, f_t scale) {
-    // Assuming U @ V^T rank-1 update
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= nz_U * nz_V)
+spmv_csc_atomic_free_kernel(i_t n, i_t m, const i_t *__restrict__ col_ptr,
+                            const i_t *__restrict__ row_ind, const f_t *__restrict__ values,
+                            const f_t *__restrict__ x, f_t *__restrict__ y, f_t alpha, f_t beta) {
+    // Each warp processes one column cooperatively, writing to shared memory first
+    // to reduce atomic contention, then flushing to global memory
+
+    extern __shared__ f_t shared_mem[];
+
+    i_t warp_id = threadIdx.x / 32;
+    i_t lane_id = threadIdx.x % 32;
+    i_t col_idx = blockIdx.x * (blockDim.x / 32) + warp_id;
+
+    if (col_idx >= n)
         return;
 
-    i_t u_idx = idx / nz_V;
-    i_t v_idx = idx % nz_V;
-    i_t row_idx = d_vector_U_indices[u_idx];
-    f_t u_val = d_vector_U_values[u_idx];
-    i_t col_idx = d_vector_V_indices[v_idx];
-    f_t v_val = d_vector_V_values[v_idx];
+    f_t x_val = x[col_idx];
+    if (abs(x_val) < 1e-20)
+        return;
 
-    f_t update_val = u_val * v_val * scale;
-    // Try to find if (row_idx, col_idx) exists in B_pinv for the column col_idx
-    i_t col_start = d_new_B_pinv_col_ptr[col_idx];
-    i_t col_end =
-        d_new_B_pinv_col_ptr[col_idx] + (d_B_pinv_col_ptr[col_idx + 1] - d_B_pinv_col_ptr[col_idx]);
-    bool found = false;
-    for (i_t j = col_start; j < col_end; ++j) {
-        if (d_new_B_pinv_row_ind[j] == row_idx) {
-            d_new_B_pinv_values[j] += update_val;
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        // Write to new B_pinv
-        i_t write_pos = atomicAdd(&write_offsets[col_idx], 1);
-        d_new_B_pinv_row_ind[write_pos] = row_idx;
-        d_new_B_pinv_values[write_pos] = update_val;
+    f_t scale = alpha * x_val;
+    i_t col_start = col_ptr[col_idx];
+    i_t col_end = col_ptr[col_idx + 1];
+    i_t nnz_in_col = col_end - col_start;
+
+    // Process column elements in parallel within the warp
+    for (i_t i = col_start + lane_id; i < col_end; i += 32) {
+        i_t row = row_ind[i];
+        f_t val = values[i];
+        atomicAdd(&y[row], scale * val);
     }
 }
 
 template <typename i_t, typename f_t>
-bool eta_update_inverse(cublasHandle_t cublas_handle, cusparseHandle_t cusparse_handle, i_t m,
-                        cusparseSpMatDescr_t &B_pinv_cusparse, i_t *&d_B_pinv_col_ptr,
-                        i_t *&d_B_pinv_row_ind, f_t *&d_B_pinv_values, i_t &nz_B_pinv,
-                        f_t *eta_b_old, f_t *eta_b_new, f_t *eta_v, f_t *eta_c, f_t *eta_d,
-                        const i_t *d_A_col_ptr, const i_t *d_A_row_ind, const f_t *d_A_values,
-                        const i_t *d_B_col_ptr, const i_t *d_B_row_ind, const f_t *d_B_values,
-                        i_t basic_leaving_index, i_t entering_index) {
+__global__ void rank1_symbolic(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
+                               const i_t *__restrict__ d_B_pinv_row_ind,
+                               const f_t *__restrict__ d_vector_U_values,
+                               const f_t *__restrict__ d_vector_V_values, i_t *d_new_B_pinv_col_ptr,
+                               const f_t scale) {
+    // Assuming U @ V^T rank-1 update
+    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= m)
+        return;
+
+    // Parallelize over columns of V
+    // If V[idx] is non-zero, merge B_pinv_row_ind with U's non-zero rows
+    f_t v_val = d_vector_V_values[idx];
+    i_t col_start = d_B_pinv_col_ptr[idx];
+    i_t col_end = d_B_pinv_col_ptr[idx + 1];
+    i_t nnz_in_col = col_end - col_start;
+    i_t num_existing_rows = nnz_in_col;
+
+    // Count new nnz due to U
+    for (i_t u_idx = 0; u_idx < m; ++u_idx) {
+        f_t u_val = d_vector_U_values[u_idx];
+        if (abs(v_val) * abs(u_val) * abs(scale) > 1e-12) {
+            i_t row_idx = u_idx;
+            // Binary search to check if row_idx exists in B_pinv column
+            i_t res = binary_search(num_existing_rows, &d_B_pinv_row_ind[col_start], row_idx);
+            if (res == -1) {
+                nnz_in_col += 1;
+            }
+        }
+    }
+    // Write new nnz to d_new_B_pinv_col_ptr
+    d_new_B_pinv_col_ptr[idx] = nnz_in_col;
+}
+
+template <typename i_t, typename f_t>
+__global__ void rank1_update(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
+                             const i_t *__restrict__ d_B_pinv_row_ind,
+                             const f_t *__restrict__ d_B_pinv_values, i_t *d_new_B_pinv_col_ptr,
+                             i_t *d_new_B_pinv_row_ind, f_t *d_new_B_pinv_values,
+                             f_t *d_vector_U_values, f_t *d_vector_V_values, const f_t scale) {
+    // Assuming U @ V^T rank-1 update
+    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= m)
+        return;
+
+    // Parallelize over columns of V
+    f_t v_val = d_vector_V_values[idx];
+    i_t col_start = d_B_pinv_col_ptr[idx];
+    i_t col_end = d_B_pinv_col_ptr[idx + 1];
+    i_t write_offset = d_new_B_pinv_col_ptr[idx];
+
+    // Merge B_pinv column with U's non-zero rows in sorted order
+    i_t i = col_start;
+    i_t j = 0; // index for U
+    while (i < col_end || j < m) {
+        i_t row_idx_B = (i < col_end) ? d_B_pinv_row_ind[i] : m + 1;
+        i_t row_idx_U = (j < m) ? j : m + 1;
+        if (i < col_end && (row_idx_B < row_idx_U)) {
+            // Copy from B_pinv
+            d_new_B_pinv_row_ind[write_offset] = d_B_pinv_row_ind[i];
+            d_new_B_pinv_values[write_offset] = d_B_pinv_values[i];
+            i++;
+            write_offset++;
+        } else if (j < m && (row_idx_U < row_idx_B)) {
+            // Copy from U
+            f_t u_val = d_vector_U_values[j];
+            if (abs(v_val) * abs(u_val) * abs(scale) > 1e-12) {
+                d_new_B_pinv_row_ind[write_offset] = row_idx_U;
+                d_new_B_pinv_values[write_offset] = scale * u_val * v_val;
+                write_offset++;
+            }
+            j++;
+        } else if (i < col_end && j < m && (row_idx_B == row_idx_U)) {
+            // Both have the same row index
+            d_new_B_pinv_row_ind[write_offset] = row_idx_B;
+            d_new_B_pinv_values[write_offset] = d_B_pinv_values[i];
+            f_t u_val = d_vector_U_values[j];
+            if (abs(v_val) * abs(u_val) * abs(scale) > 1e-12) {
+                d_new_B_pinv_values[write_offset] += scale * u_val * v_val;
+            }
+            i++;
+            j++;
+            write_offset++;
+        } else {
+            break;
+        }
+    }
+}
+
+template <typename i_t, typename f_t>
+bool eta_update_inverse(cublasHandle_t cublas_handle, cusparseHandle_t cusparse_handle, i_t m, cusparseSpMatDescr_t &B_pinv_cusparse,
+                        i_t *&d_B_pinv_col_ptr, i_t *&d_B_pinv_row_ind, f_t *&d_B_pinv_values,
+                        i_t &nz_B_pinv, f_t *eta_b_old, f_t *eta_b_new, f_t *eta_v, f_t *eta_c,
+                        f_t *eta_d, const i_t *d_A_col_ptr, const i_t *d_A_row_ind,
+                        const f_t *d_A_values, const i_t *d_B_col_ptr, const i_t *d_B_row_ind,
+                        const f_t *d_B_values, i_t basic_leaving_index, i_t entering_index) {
     const i_t j = basic_leaving_index; // Index of leaving variable in basis
 
     cudaStream_t stream1, stream2;
@@ -732,10 +757,6 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, cusparseHandle_t cusparse_
                                      eta_b_new, stream2);
     CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream1), "cudaStreamDestroy stream1");
     CUDA_CALL_AND_CHECK(cudaStreamDestroy(stream2), "cudaStreamDestroy stream2");
-
-    CUDA_CALL_AND_CHECK(cudaMemset(eta_v, 0, m * sizeof(f_t)), "cudaMemset eta_v");
-    CUDA_CALL_AND_CHECK(cudaMemset(eta_c, 0, m * sizeof(f_t)), "cudaMemset eta_c");
-    CUDA_CALL_AND_CHECK(cudaMemset(eta_d, 0, m * sizeof(f_t)), "cudaMemset eta_d");
 
     // Sherman-Morrison formula for updating B_inv when replacing column j:
     // B_new = B with column j replaced by b_new
@@ -761,28 +782,21 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, cusparseHandle_t cusparse_
     // So we need to recompute: p = B_inv @ (b_new - b_old)
     alpha = 1.0;
     beta = 0.0;
-    // Use cusparse SpMV for B_inv @ u
-    // TODO: Implement CSC Matrix Sparse Vector multiplication kernel for better performance
-    cusparseDnVecDescr_t vec_u, vec_p;
-    CUSPARSE_CALL_AND_CHECK(cusparseCreateDnVec(&vec_u, m, eta_c, CUDA_R_64F),
-                            "cusparseCreateDnVec vec_u");
-    CUSPARSE_CALL_AND_CHECK(cusparseCreateDnVec(&vec_p, m, eta_v, CUDA_R_64F),
-                            "cusparseCreateDnVec vec_p");
-    size_t bufferSize = 0;
-    void *dBuffer = nullptr;
-    CUSPARSE_CALL_AND_CHECK(
-        cusparseSpMV_bufferSize(cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
-                                B_pinv_cusparse, vec_u, &beta, vec_p, CUDA_R_64F,
-                                CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize),
-        "cusparseSpMV_bufferSize");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&dBuffer, bufferSize), "cudaMalloc dBuffer for SpMV");
-    CUSPARSE_CALL_AND_CHECK(cusparseSpMV(cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
-                                         B_pinv_cusparse, vec_u, &beta, vec_p, CUDA_R_64F,
-                                         CUSPARSE_SPMV_ALG_DEFAULT, dBuffer),
-                            "cusparseSpMV B_inv @ u");
-    CUDA_CALL_AND_CHECK(cudaFree(dBuffer), "cudaFree dBuffer for SpMV");
-    CUSPARSE_CALL_AND_CHECK(cusparseDestroyDnVec(vec_u), "cusparseDestroyDnVec vec_u");
-    CUSPARSE_CALL_AND_CHECK(cusparseDestroyDnVec(vec_p), "cusparseDestroyDnVec vec_p");
+
+    // Use custom CSC SpMV kernel for B_inv @ u
+    // First, initialize output vector with beta * y
+    CUDA_CALL_AND_CHECK(cudaMemset(eta_v, 0, m * sizeof(f_t)), "cudaMemset eta_v to zero");
+
+    // Launch spmv_csc_kernel
+    i_t block_size = 256;
+    i_t grid_size = (m + block_size - 1) / block_size;
+    spmv_csc_kernel<<<grid_size, block_size>>>(m, m, d_B_pinv_col_ptr, d_B_pinv_row_ind,
+                                               d_B_pinv_values,
+                                               eta_c, // input vector (u = b_new - b_old)
+                                               eta_v, // output vector (p = B_inv @ u)
+                                               alpha, beta);
+    CUDA_CALL_AND_CHECK(cudaGetLastError(), "spmv_csc_kernel launch");
+    CUDA_CALL_AND_CHECK(cudaDeviceSynchronize(), "spmv_csc_kernel sync");
 
     // Get p[j] and compute denominator: 1 + p[j]
     f_t p_j;
@@ -796,52 +810,13 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, cusparseHandle_t cusparse_
     }
 
     // Kernel parameters
-    int block_size = 256;
-    int grid_size = (m + block_size - 1) / block_size;
-
-    // Sparsify p
-    i_t *d_sparse_p_indices;
-    f_t *d_sparse_p_values;
-    i_t *d_nnz_p;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_nnz_p, sizeof(i_t)), "cudaMalloc d_nnz_p");
-    CUDA_CALL_AND_CHECK(cudaMemset(d_nnz_p, 0, sizeof(i_t)), "cudaMemset d_nnz_p");
-    get_vector_nnz<<<grid_size, block_size>>>(m, eta_v, d_nnz_p);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "get_vector_nnz kernel for p");
-    i_t h_nnz_p;
-    CUDA_CALL_AND_CHECK(cudaMemcpy(&h_nnz_p, d_nnz_p, sizeof(i_t), cudaMemcpyDeviceToHost),
-                        "cudaMemcpy nnz_p to host");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_sparse_p_indices, h_nnz_p * sizeof(i_t)),
-                        "cudaMalloc d_sparse_p_indices");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_sparse_p_values, h_nnz_p * sizeof(f_t)),
-                        "cudaMalloc d_sparse_p_values");
-    CUDA_CALL_AND_CHECK(cudaMemset(d_nnz_p, 0, sizeof(i_t)),
-                        "cudaMemset d_write_offset_p"); // reuse d_nnz_p as write offset
-    vector_dense2sparse<<<grid_size, block_size>>>(m, eta_v, d_sparse_p_indices, d_sparse_p_values,
-                                                   d_nnz_p);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "vector_dense2sparse kernel for p");
+    block_size = 256;
+    grid_size = (m + block_size - 1) / block_size;
 
     // Extract row j of B_inv (store in eta_d)
     // B_inv is column-major, so row j is at offsets j, j+m, j+2m, ...
-    i_t *d_sparse_rowj_indices;
-    f_t *d_sparse_rowj_values;
-    i_t *d_nnz_rowj;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_nnz_rowj, sizeof(i_t)), "cudaMalloc d_nnz_rowj");
-    CUDA_CALL_AND_CHECK(cudaMemset(d_nnz_rowj, 0, sizeof(i_t)), "cudaMemset d_nnz_rowj");
-    get_row_nnz<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind, j, d_nnz_rowj);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "get_row_nnz kernel for row_j");
-    i_t h_nnz_rowj;
-    CUDA_CALL_AND_CHECK(cudaMemcpy(&h_nnz_rowj, d_nnz_rowj, sizeof(i_t), cudaMemcpyDeviceToHost),
-                        "cudaMemcpy nnz_rowj to host");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_sparse_rowj_indices, h_nnz_rowj * sizeof(i_t)),
-                        "cudaMalloc d_sparse_rowj_indices");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_sparse_rowj_values, h_nnz_rowj * sizeof(f_t)),
-                        "cudaMalloc d_sparse_rowj_values");
-    CUDA_CALL_AND_CHECK(cudaMemset(d_nnz_rowj, 0, sizeof(i_t)),
-                        "cudaMemset d_write_offset_rowj"); // reuse d_nnz_rowj as write offset
-    extract_sparse_row<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                                  d_B_pinv_values, j, d_sparse_rowj_indices,
-                                                  d_sparse_rowj_values, d_nnz_rowj);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "extract_sparse_row kernel for row_j");
+    phase2_cu::fetch_row_as_dense(m, j, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, eta_d,
+                                  0);
 
     // B_inv = B_inv - (p @ row_j) / denom
     f_t scale = -1.0 / denom;
@@ -852,18 +827,13 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, cusparseHandle_t cusparse_
                         "cudaMalloc d_new_B_pinv_col_ptr");
     CUDA_CALL_AND_CHECK(cudaMemset(d_new_B_pinv_col_ptr, 0, (m + 1) * sizeof(i_t)),
                         "cudaMemset d_new_B_pinv_col_ptr");
-    grid_size = (h_nnz_p * h_nnz_rowj + block_size - 1) / block_size;
-    get_rank1_delta_nnz<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                                   d_sparse_p_indices, d_sparse_rowj_indices,
-                                                   h_nnz_p, h_nnz_rowj, d_new_B_pinv_col_ptr);
+    grid_size = (m + block_size - 1) / block_size;
+    rank1_symbolic<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind, eta_v, eta_d,
+                                              d_new_B_pinv_col_ptr, scale);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "get_rank1_delta_nnz_nnz kernel");
     // 2. Allocate new arrays for updated B_pinv
     thrust::device_ptr<i_t> dev_ptr = thrust::device_pointer_cast(d_new_B_pinv_col_ptr);
     thrust::exclusive_scan(thrust::cuda::par, dev_ptr, dev_ptr + m + 1, dev_ptr, i_t(0));
-    // Add the old col ptr to the new col ptr to get final counts
-    thrust::device_ptr<i_t> old_col_ptr = thrust::device_pointer_cast(d_B_pinv_col_ptr);
-    thrust::transform(thrust::cuda::par, dev_ptr, dev_ptr + m + 1, old_col_ptr, dev_ptr,
-                      thrust::plus<i_t>());
     i_t nz_new_B_pinv = 0;
     CUDA_CALL_AND_CHECK(
         cudaMemcpy(&nz_new_B_pinv, d_new_B_pinv_col_ptr + m, sizeof(i_t), cudaMemcpyDeviceToHost),
@@ -875,34 +845,15 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, cusparseHandle_t cusparse_
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_new_B_pinv_values, nz_new_B_pinv * sizeof(f_t)),
                         "cudaMalloc d_new_B_pinv_values");
     // 3. Launch kernel to perform the rank-1 update and fill new arrays
-    i_t *write_offsets;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&write_offsets, (m + 1) * sizeof(i_t)),
-                        "cudaMalloc write_offsets");
-    CUDA_CALL_AND_CHECK(cudaMemcpy(write_offsets, d_new_B_pinv_col_ptr, (m + 1) * sizeof(i_t),
-                                   cudaMemcpyDeviceToDevice),
-                        "cudaMemcpy write_offsets init");
     grid_size = (m + block_size - 1) / block_size;
-    rank1_preprocess<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                                d_B_pinv_values, d_new_B_pinv_row_ind,
-                                                d_new_B_pinv_values, write_offsets);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "rank1_preprocess kernel");
-    grid_size = (h_nnz_p * h_nnz_rowj + block_size - 1) / block_size;
-    rank1_csc_update<<<grid_size, block_size>>>(
-        m, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, d_new_B_pinv_col_ptr,
-        d_new_B_pinv_row_ind, d_new_B_pinv_values, d_sparse_p_indices, d_sparse_p_values,
-        d_sparse_rowj_indices, d_sparse_rowj_values, h_nnz_p, h_nnz_rowj, write_offsets, scale);
+    rank1_update<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values,
+                                            d_new_B_pinv_col_ptr, d_new_B_pinv_row_ind,
+                                            d_new_B_pinv_values, eta_v, eta_d, scale);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "rank1_csc_update kernel");
     // 4. Clean up and update pointers
     CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv_col_ptr), "cudaFree old d_B_pinv_col_ptr");
     CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv_row_ind), "cudaFree old d_B_pinv_row_ind");
     CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv_values), "cudaFree old d_B_pinv_values");
-    CUDA_CALL_AND_CHECK(cudaFree(d_sparse_p_indices), "cudaFree d_sparse_p_indices");
-    CUDA_CALL_AND_CHECK(cudaFree(d_sparse_p_values), "cudaFree d_sparse_p_values");
-    CUDA_CALL_AND_CHECK(cudaFree(d_nnz_p), "cudaFree d_nnz_p");
-    CUDA_CALL_AND_CHECK(cudaFree(d_sparse_rowj_indices), "cudaFree d_sparse_rowj_indices");
-    CUDA_CALL_AND_CHECK(cudaFree(d_sparse_rowj_values), "cudaFree d_sparse_rowj_values");
-    CUDA_CALL_AND_CHECK(cudaFree(d_nnz_rowj), "cudaFree d_nnz_rowj");
-    CUDA_CALL_AND_CHECK(cudaFree(write_offsets), "cudaFree write_offsets");
     d_B_pinv_col_ptr = d_new_B_pinv_col_ptr;
     d_B_pinv_row_ind = d_new_B_pinv_row_ind;
     d_B_pinv_values = d_new_B_pinv_values;
@@ -1598,8 +1549,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             should_refactor = !phase2_cu::eta_update_inverse(
                 cublas_handle, cusparse_pinv_handle, m, B_pinv_cusparse, d_B_pinv_col_ptr,
                 d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv, eta_b_old, eta_b_new, eta_v, eta_c,
-                eta_d, d_A_col_ptr, d_A_row_ind, d_A_values, d_B_col_ptr, d_B_row_ind,
-                d_B_values, basic_leaving_index, entering_index);
+                eta_d, d_A_col_ptr, d_A_row_ind, d_A_values, d_B_col_ptr, d_B_row_ind, d_B_values,
+                basic_leaving_index, entering_index);
 
             {
                 // Debug: copy B_pinv to host, construct as dense, then copy back to d_B_pinv
@@ -1656,7 +1607,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             // TODO: It's probably not smart to rebuild B and Bt from scratch every time
             // Instead use a 95% threshold (or higher) to determine the size per row to
             // allocate s.t. we don't have to realloc every time
-            phase2_cu::build_basis_on_device(m, d_A_col_ptr, d_A_row_ind, d_A_values, d_basic_list, d_B_col_ptr, d_B_row_ind, d_B_values, nz_B);
+            phase2_cu::build_basis_on_device(m, d_A_col_ptr, d_A_row_ind, d_A_values, d_basic_list,
+                                             d_B_col_ptr, d_B_row_ind, d_B_values, nz_B);
 
             if (settings.profile) {
                 settings.timer.stop("Inverse Update 2");
@@ -1671,8 +1623,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             // Recompute d_B_pinv
             phase2_cu::compute_inverse<i_t, f_t>(
                 cusparse_handle, cudss_handle, cudss_config, m, n, d_A_col_ptr, d_A_row_ind,
-                d_A_values, d_B_col_ptr, d_B_row_ind, d_B_values, basic_list, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, nz_B,
-                nz_B_pinv, settings);
+                d_A_values, d_B_col_ptr, d_B_row_ind, d_B_values, basic_list, d_B_pinv_col_ptr,
+                d_B_pinv_row_ind, d_B_pinv_values, nz_B, nz_B_pinv, settings);
 
             {
                 // Debug: copy B_pinv to host, construct as dense, then copy back to d_B_pinv
