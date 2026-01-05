@@ -2,11 +2,11 @@
 
 set -Eeuo pipefail
 
-export CUDSS_DIR="/home/jupieper/tools/libcudss-linux-x86_64-0.7.1.4_cuda13-archive"
+export CUDSS_DIR="/home/jupieper/tools/libcudss-linux-x86_64-0.7.1.4_cuda12-archive"
 
 export CC="/cluster/data/gcc/11/bin/gcc"
 export CXX="/cluster/data/gcc/11/bin/g++"
-export CMAKE_CUDA_COMPILER="/cluster/data/cuda/13.0.2/bin/nvcc"
+export CMAKE_CUDA_COMPILER="/cluster/data/cuda/12.8.1/bin/nvcc"
 
 # NOTE: Added CUDA Lineinfo here just in case
 cmake -B build \
