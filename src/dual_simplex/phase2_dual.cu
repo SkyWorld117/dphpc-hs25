@@ -230,15 +230,14 @@ template <typename i_t, typename f_t>
 __global__ void count_nnz_cols(i_t m, i_t num_cols, i_t col_start, const f_t *__restrict__ X_slice,
                                i_t *__restrict__ nnz_per_col) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_cols * m)
-        return;
+    if (idx >= num_cols) return;
 
-    i_t col_idx = idx / m;
-    i_t row_idx = idx % m;
-
-    f_t val = X_slice[col_idx * m + row_idx]; // Column-major
-    if (abs(val) > static_cast<f_t>(1e-12)) {
-        atomicAdd(&nnz_per_col[col_idx], 1);
+    i_t col_idx = idx;
+    for (i_t row_idx = 0; row_idx < m; ++row_idx) {
+        f_t val = X_slice[col_idx * m + row_idx]; // Column-major
+        if (abs(val) > 1e-12) {
+            nnz_per_col[col_idx] += 1;
+        }
     }
 }
 
@@ -247,16 +246,17 @@ __global__ void fill_csc_cols(i_t m, i_t num_cols, i_t col_start, const f_t *__r
                               i_t *__restrict__ write_offsets, i_t *__restrict__ X_row_ind,
                               f_t *__restrict__ X_values) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_cols * m)
-        return;
-    i_t col_idx = idx / m;
-    i_t row_idx = idx % m;
-    f_t val = X_slice[col_idx * m + row_idx]; // Column-major
-    if (abs(val) > static_cast<f_t>(1e-12)) {
-        // Get position to write using atomic increment on the column offset
-        i_t pos = atomicAdd(&write_offsets[col_idx], 1);
-        X_row_ind[pos] = row_idx;
-        X_values[pos] = val;
+    if (idx >= num_cols) return;
+
+    i_t col_idx = idx;
+    for (i_t row_idx = 0; row_idx < m; ++row_idx) {
+        f_t val = X_slice[col_idx * m + row_idx]; // Column-major
+        if (abs(val) > 1e-12) {
+            // Get position to write using atomic increment on the column offset
+            i_t pos = write_offsets[col_idx]++;
+            X_row_ind[pos] = row_idx;
+            X_values[pos] = val;
+        }
     }
 }
 
@@ -405,7 +405,7 @@ void compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_han
         CUDA_CALL_AND_CHECK(
             cudaMemset(d_X_col_ptr + col_start, 0, (cols_in_slice + 1) * sizeof(i_t)),
             "cudaMemset d_X_col_ptr for slice");
-        grid_size = (cols_in_slice * m + block_size - 1) / block_size;
+        grid_size = (cols_in_slice + block_size - 1) / block_size;
         count_nnz_cols<<<grid_size, block_size>>>(m, cols_in_slice, col_start, d_X_slice,
                                                   d_X_col_ptr + col_start);
         CUDA_CALL_AND_CHECK(cudaGetLastError(), "count_nnz_cols kernel for X slice");
@@ -431,7 +431,7 @@ void compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_han
         CUDA_CALL_AND_CHECK(cudaMemcpy(d_write_offsets, d_X_col_ptr + col_start,
                                        cols_in_slice * sizeof(i_t), cudaMemcpyDeviceToDevice),
                             "cudaMemcpy d_write_offsets for X slice");
-        grid_size = (cols_in_slice * m + block_size - 1) / block_size;
+        grid_size = (cols_in_slice + block_size - 1) / block_size;
         fill_csc_cols<<<grid_size, block_size>>>(m, cols_in_slice, col_start, d_X_slice,
                                                  d_write_offsets, d_X_row_ind_slices[slice_idx],
                                                  d_X_values_slices[slice_idx]);
