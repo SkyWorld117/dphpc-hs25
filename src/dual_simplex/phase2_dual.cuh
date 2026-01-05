@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cuda_device_runtime_api.h"
 #include <dual_simplex/phase2.hpp>
 
 #include <dual_simplex/basis_solves.hpp>
@@ -26,7 +27,8 @@
     do {                                                                                           \
         cudaError_t cuda_error = call;                                                             \
         if (cuda_error != cudaSuccess) {                                                           \
-            printf("CUDA API returned error = %d, details: " #msg "\n", cuda_error);               \
+            printf("CUDA API returned error = %d from call " #msg ", details: %s\n", cuda_error,   \
+                   cudaGetErrorString(cuda_error));                                                \
         }                                                                                          \
     } while (0);
 
