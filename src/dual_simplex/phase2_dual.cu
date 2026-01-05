@@ -2798,6 +2798,11 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                 settings.timer.start("Inverse Refactorizaton");
             }
 
+            // Free d_B_pinv
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv_col_ptr), "cudaFree d_B_pinv_col_ptr");
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv_row_ind), "cudaFree d_B_pinv_row_ind");
+            CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv_values), "cudaFree d_B_pinv_values");
+
             // Recompute d_B_pinv
             phase2_cu::compute_inverse<i_t, f_t>(
                 cusparse_handle, cudss_handle, cudss_config, m, n, d_A_col_ptr, d_A_row_ind,
@@ -2854,6 +2859,12 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             settings.concurrent_halt->load(std::memory_order_acquire) == 1) {
             return dual::status_t::CONCURRENT_LIMIT;
         }
+
+        // End of iteration cleanup
+        CUDA_CALL_AND_CHECK(cudaFree(d_delta_y_sparse_indices), "cudaFree d_delta_y_sparse_indices");
+        CUDA_CALL_AND_CHECK(cudaFree(d_delta_y_sparse_values), "cudaFree d_delta_y_sparse_values");
+        CUDA_CALL_AND_CHECK(cudaFree(d_delta_z_sparse_indices), "cudaFree d_delta_z_sparse_indices");
+        CUDA_CALL_AND_CHECK(cudaFree(d_delta_z_sparse_values), "cudaFree d_delta_z_sparse_values");
     }
     if (iter >= iter_limit) {
         status = dual::status_t::ITERATION_LIMIT;
