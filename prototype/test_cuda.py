@@ -10,7 +10,6 @@ Verifies correctness by:
 import torch
 from torch.profiler import profile, record_function, ProfilerActivity
 import numpy as np
-from scipy.optimize import linprog
 import sys
 import time
 import argparse
