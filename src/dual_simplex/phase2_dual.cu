@@ -1823,7 +1823,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         i_t direction = 0;
         i_t basic_leaving_index = -1;
         i_t leaving_index = -1;
-        f_t max_val;
+        f_t max_val = 0.0;
         timers.start_timer();
         if (settings.use_steepest_edge_pricing) {
             leaving_index = phase2::steepest_edge_pricing_with_infeasibilities(
