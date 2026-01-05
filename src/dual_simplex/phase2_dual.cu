@@ -122,35 +122,39 @@ void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_i
 template <typename i_t, typename f_t>
 __global__ void BtB_preprocess(i_t m, const i_t *__restrict__ d_B_col_ptr,
                                const i_t *__restrict__ d_B_row_ind,
-                               const f_t *__restrict__ d_B_values, i_t *&d_BtB_row_ptr) {
+                               const f_t *__restrict__ d_B_values, i_t *d_BtB_row_ptr) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (1 + m) * m / 2) // Mathematically (1 + m) * m is always even
-        return;
+    if (idx >= m) return; // Parallelization over row
 
-    // Map idx to (row, col) in upper triangular matrix
-    // I honestly have no idea how I came up with this formula
-    f_t r = (2 * m + 1) / 2.0;
-    i_t row = static_cast<i_t>(floor(r - sqrt(r * r - 2 * idx)));
-    i_t col = idx + m - (2 * m - row) * (row + 1) / 2;
+    for (i_t col = 0; col < m; ++col) {
+        // Fix the index for symmetric matrix (ensuring the same floating point order)
+        i_t vec_a = idx <= col ? idx : col; // Lower index
+        i_t vec_b = idx <= col ? col : idx; // Higher index
 
-    // Compute dot product of column 'row' and column 'col' of B
-    f_t dot_product = 0.0;
-    for (i_t k1 = d_B_col_ptr[row]; k1 < d_B_col_ptr[row + 1]; ++k1) {
-        i_t b_row = d_B_row_ind[k1];
-        f_t b_val = d_B_values[k1];
-        // Search for b_row in column 'col'
-        for (i_t k2 = d_B_col_ptr[col]; k2 < d_B_col_ptr[col + 1]; ++k2) {
-            if (d_B_row_ind[k2] == b_row) {
-                dot_product += b_val * d_B_values[k2];
-                break;
+        // Compute dot product of column 'vec_a' and column 'vec_b' of B
+        i_t vec_a_start = d_B_col_ptr[vec_a];
+        i_t vec_a_end = d_B_col_ptr[vec_a + 1];
+        i_t vec_b_start = d_B_col_ptr[vec_b];
+        i_t vec_b_end = d_B_col_ptr[vec_b + 1];
+        // Merge-like traversal (assuming both columns are sorted by row indices)
+        f_t dot_product = 0.0;
+        i_t pa = vec_a_start;
+        i_t pb = vec_b_start;
+        while (pa < vec_a_end && pb < vec_b_end) {
+            i_t row_a = d_B_row_ind[pa];
+            i_t row_b = d_B_row_ind[pb];
+            if (row_a == row_b) {
+                dot_product += d_B_values[pa] * d_B_values[pb];
+                ++pa;
+                ++pb;
+            } else if (row_a < row_b) {
+                ++pa;
+            } else {
+                ++pb;
             }
         }
-    }
-    if (abs(dot_product) > 1e-12) {
-        // Atomic write to column pointer
-        atomicAdd(&d_BtB_row_ptr[col], 1);
-        if (row != col) {
-            atomicAdd(&d_BtB_row_ptr[row], 1); // Symmetric entry
+        if (abs(dot_product) > 1e-12) {
+            d_BtB_row_ptr[idx] += 1;
         }
     }
 }
@@ -161,38 +165,40 @@ __global__ void BtB_compute(i_t m, const i_t *__restrict__ d_B_col_ptr,
                             i_t *d_BtB_row_ptr, i_t *d_BtB_col_ind, f_t *d_BtB_values,
                             i_t *write_offsets) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (1 + m) * m / 2) // Mathematically (1 + m) * m is always even
-        return;
+    if (idx >= m) return; // Parallelization over row
 
-    // Map idx to (row, col) in upper triangular matrix
-    f_t r = (2 * m + 1) / 2.0;
-    i_t row = static_cast<i_t>(floor(r - sqrt(r * r - 2 * idx)));
-    i_t col = idx + m - (2 * m - row) * (row + 1) / 2;
+    for (i_t col = 0; col < m; ++col) {
+        // Fix the index for symmetric matrix (ensuring the same floating point order)
+        i_t vec_a = idx <= col ? idx : col; // Lower index
+        i_t vec_b = idx <= col ? col : idx; // Higher index
 
-    // Compute dot product of column 'row' and column 'col' of B
-    f_t dot_product = 0.0;
-    for (i_t k1 = d_B_col_ptr[row]; k1 < d_B_col_ptr[row + 1]; ++k1) {
-        i_t b_row = d_B_row_ind[k1];
-        f_t b_val = d_B_values[k1];
-        // Search for b_row in column 'col'
-        for (i_t k2 = d_B_col_ptr[col]; k2 < d_B_col_ptr[col + 1]; ++k2) {
-            if (d_B_row_ind[k2] == b_row) {
-                dot_product += b_val * d_B_values[k2];
-                break;
+        // Compute dot product of column 'vec_a' and column 'vec_b' of B
+        i_t vec_a_start = d_B_col_ptr[vec_a];
+        i_t vec_a_end = d_B_col_ptr[vec_a + 1];
+        i_t vec_b_start = d_B_col_ptr[vec_b];
+        i_t vec_b_end = d_B_col_ptr[vec_b + 1];
+        // Merge-like traversal (assuming both columns are sorted by row indices)
+        f_t dot_product = 0.0;
+        i_t pa = vec_a_start;
+        i_t pb = vec_b_start;
+        while (pa < vec_a_end && pb < vec_b_end) {
+            i_t row_a = d_B_row_ind[pa];
+            i_t row_b = d_B_row_ind[pb];
+            if (row_a == row_b) {
+                dot_product += d_B_values[pa] * d_B_values[pb];
+                ++pa;
+                ++pb;
+            } else if (row_a < row_b) {
+                ++pa;
+            } else {
+                ++pb;
             }
         }
-    }
-    if (abs(dot_product) > 1e-12) {
-        // Write to upper triangular entry
-        i_t pos_upper = atomicAdd(&write_offsets[row], 1);
-        d_BtB_col_ind[pos_upper] = col;
-        d_BtB_values[pos_upper] = dot_product;
-
-        if (row != col) {
-            // Write to symmetric lower triangular entry
-            i_t pos_lower = atomicAdd(&write_offsets[col], 1);
-            d_BtB_col_ind[pos_lower] = row;
-            d_BtB_values[pos_lower] = dot_product;
+        if (abs(dot_product) > 1e-12) {
+            // Write to BtB
+            i_t pos = write_offsets[idx]++;
+            d_BtB_col_ind[pos] = col;
+            d_BtB_values[pos] = dot_product;
         }
     }
 }
@@ -292,7 +298,7 @@ void compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_han
     CUDA_CALL_AND_CHECK(cudaMemset(d_BtB_row_ptr, 0, (m + 1) * sizeof(i_t)),
                         "cudaMemset d_BtB_row_ptr");
     int block_size = 256;
-    int grid_size = ((1 + m) * m / 2 + block_size - 1) / block_size;
+    int grid_size = (m + block_size - 1) / block_size;
     BtB_preprocess<<<grid_size, block_size>>>(m, d_B_col_ptr, d_B_row_ind, d_B_values,
                                               d_BtB_row_ptr);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "BtB_preprocess kernel");
@@ -1175,7 +1181,6 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                 h_B_pinv_dense[col * m + row] = val; // Column-major
             }
         }
-        CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_B_pinv");
         CUDA_CALL_AND_CHECK(cudaMemcpy(d_B_pinv, h_B_pinv_dense.data(), m * m * sizeof(f_t),
                                        cudaMemcpyHostToDevice),
                             "cudaMemcpy h_B_pinv_dense to d_B_pinv");
@@ -1761,7 +1766,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDA_CALL_AND_CHECK(cudaFree(d_A_values), "cudaFree d_A_values");
     CUDA_CALL_AND_CHECK(cudaFree(d_B_col_ptr), "cudaFree d_B_col_ptr");
     CUDA_CALL_AND_CHECK(cudaFree(d_B_values), "cudaFree d_B_values");
-    CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv), "cudaFree d_D_pinv");
+    CUDA_CALL_AND_CHECK(cudaFree(d_B_pinv), "cudaFree d_B_pinv");
     CUBLAS_CALL_AND_CHECK(cublasDestroy(cublas_handle), "cublasDestroy");
     CUSPARSE_CALL_AND_CHECK(cusparseDestroy(cusparse_handle), "cusparseDestroy");
     CUSPARSE_CALL_AND_CHECK(cusparseDestroySpMat(B_pinv_cusparse),
