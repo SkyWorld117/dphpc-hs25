@@ -75,30 +75,147 @@ class HighResTimer {
   //
   void display(std::ostream& os)
   {
-    os << "Timer Results (in ms):" << std::endl;
-    for (auto it = timers.begin(); it != timers.end(); ++it) {
-      os << "   " << it->first << " called " << it->second.first
-         << " times, average time: " << (it->second.second / (1000000.0 * it->second.first) / 1000.0f)
-         << std::endl;
+    if (timers.empty()) {
+      os << "No timers recorded." << std::endl;
+      return;
     }
+
+    // Calculate column widths
+    size_t max_label_width = 5; // "Label"
+    for (const auto& timer : timers) {
+      max_label_width = std::max(max_label_width, timer.first.length());
+    }
+
+    // Print header
+    os << "\n" << std::string(max_label_width + 50, '=') << std::endl;
+    os << "Timer Results" << std::endl;
+    os << std::string(max_label_width + 50, '=') << std::endl;
+    
+    // Print column headers
+    os << std::left;
+    os.width(max_label_width + 2);
+    os << "Label";
+    os.width(12);
+    os << "Calls";
+    os.width(18);
+    os << "Avg Time (s)";
+    os.width(18);
+    os << "Total Time (s)";
+    os << std::endl;
+    os << std::string(max_label_width + 50, '-') << std::endl;
+
+    // Print data rows
+    for (const auto& timer : timers) {
+      double avg_time = timer.second.second / (1000000000.0 * timer.second.first);
+      double total_time = timer.second.second / 1000000000.0;
+      
+      os << std::left;
+      os.width(max_label_width + 2);
+      os << timer.first;
+      os.width(12);
+      os << timer.second.first;
+      os.width(18);
+      os << avg_time;
+      os.width(18);
+      os << total_time;
+      os << std::endl;
+    }
+    os << std::string(max_label_width + 50, '=') << std::endl;
   }
 
   void display(std::ostream& os, std::string label)
   {
     auto it = timers.find(label);
-    os << it->first << " called " << it->second.first
-       << " times, average time: " << (it->second.second / (1000000.0 * it->second.first) / 1000.0f)
-       << std::endl;
+    if (it == timers.end()) {
+      os << "Timer '" << label << "' not found." << std::endl;
+      return;
+    }
+
+    size_t label_width = std::max(label.length(), size_t(5));
+    
+    // Print header
+    os << "\n" << std::string(label_width + 50, '=') << std::endl;
+    os << "Timer Result: " << label << std::endl;
+    os << std::string(label_width + 50, '=') << std::endl;
+    
+    // Print column headers
+    os << std::left;
+    os.width(label_width + 2);
+    os << "Label";
+    os.width(12);
+    os << "Calls";
+    os.width(18);
+    os << "Avg Time (s)";
+    os.width(18);
+    os << "Total Time (s)";
+    os << std::endl;
+    os << std::string(label_width + 50, '-') << std::endl;
+
+    // Print data row
+    double avg_time = it->second.second / (1000000000.0 * it->second.first);
+    double total_time = it->second.second / 1000000000.0;
+    
+    os << std::left;
+    os.width(label_width + 2);
+    os << it->first;
+    os.width(12);
+    os << it->second.first;
+    os.width(18);
+    os << avg_time;
+    os.width(18);
+    os << total_time;
+    os << std::endl;
+    os << std::string(label_width + 50, '=') << std::endl;
   }
 
   void display_and_clear(std::ostream& os)
   {
-    os << "Timer Results (in ms):" << std::endl;
-    for (auto it = timers.begin(); it != timers.end(); ++it) {
-      os << "   " << it->first << " called " << it->second.first
-         << " times, average time: " << (it->second.second / (1000000.0 * it->second.first) / 1000.0f)
-         << std::endl;
+    if (timers.empty()) {
+      os << "No timers recorded." << std::endl;
+      return;
     }
+
+    // Calculate column widths
+    size_t max_label_width = 5; // "Label"
+    for (const auto& timer : timers) {
+      max_label_width = std::max(max_label_width, timer.first.length());
+    }
+
+    // Print header
+    os << "\n" << std::string(max_label_width + 50, '=') << std::endl;
+    os << "Timer Results" << std::endl;
+    os << std::string(max_label_width + 50, '=') << std::endl;
+    
+    // Print column headers
+    os << std::left;
+    os.width(max_label_width + 2);
+    os << "Label";
+    os.width(12);
+    os << "Calls";
+    os.width(18);
+    os << "Avg Time (s)";
+    os.width(18);
+    os << "Total Time (s)";
+    os << std::endl;
+    os << std::string(max_label_width + 50, '-') << std::endl;
+
+    // Print data rows
+    for (const auto& timer : timers) {
+      double avg_time = timer.second.second / (1000000000.0 * timer.second.first);
+      double total_time = timer.second.second / 1000000000.0;
+      
+      os << std::left;
+      os.width(max_label_width + 2);
+      os << timer.first;
+      os.width(12);
+      os << timer.second.first;
+      os.width(18);
+      os << avg_time;
+      os.width(18);
+      os << total_time;
+      os << std::endl;
+    }
+    os << std::string(max_label_width + 50, '=') << std::endl;
 
     timers.clear();
   }

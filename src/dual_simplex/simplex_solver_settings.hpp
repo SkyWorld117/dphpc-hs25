@@ -56,9 +56,10 @@ struct simplex_solver_settings_t {
       scale_columns(true),
       relaxation(false),
       use_left_looking_lu(false),
-      eliminate_singletons(true),
+      eliminate_singletons(false),
       print_presolve_stats(true),
       refactor_frequency(100),
+      pinv_slices(1),
       profile(false),
       iteration_log_frequency(1000),
       first_iteration_log(2),
@@ -106,6 +107,7 @@ struct simplex_solver_settings_t {
   bool print_presolve_stats;       // true to print presolve stats
   bool profile;                    // true to enable profiling
   i_t refactor_frequency;          // number of basis updates before refactorization
+  i_t pinv_slices;                 // number of slices for parallel INVERSE
   i_t iteration_log_frequency;     // number of iterations between log updates
   i_t first_iteration_log;         // number of iterations to log at beginning of solve
   i_t num_threads;                 // number of threads to use

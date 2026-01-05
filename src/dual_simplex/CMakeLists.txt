@@ -36,7 +36,8 @@ set(DUAL_SIMPLEX_SRC_FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/tic_toc.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/triangle_solve.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/vector_math.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/highs_presolve.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/highs_presolve.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/problem_analysis.cpp)
 
 set(CUOPT_SRC_FILES ${CUOPT_SRC_FILES}
   ${DUAL_SIMPLEX_SRC_FILES} PARENT_SCOPE)
