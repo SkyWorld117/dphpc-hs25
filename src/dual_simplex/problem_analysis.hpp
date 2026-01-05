@@ -31,6 +31,8 @@ template <typename i_t, typename f_t> class problem_analyzer_t {
     // smallest block size that is greater than 95%/99% of the rows/columns
     i_t block_size_per_col_95 = 0;
     i_t block_size_per_col_99 = 0;
+
+    bool sorted_indices = false;
 };
 
 } // namespace cuopt::linear_programming::dual_simplex

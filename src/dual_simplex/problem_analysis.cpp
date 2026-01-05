@@ -37,6 +37,22 @@ template <typename i_t, typename f_t> void problem_analyzer_t<i_t, f_t>::analyze
     } else {
         median_nnz_per_col = sorted_col_counts[n / 2];
     }
+
+    // Check if indices are sorted
+    sorted_indices = true;
+    for (i_t j = 0; j < n; ++j) {
+        i_t col_start = A.col_start[j];
+        i_t col_end = A.col_start[j + 1];
+        for (i_t p = col_start + 1; p < col_end; ++p) {
+            if (A.i[p] < A.i[p - 1]) {
+                sorted_indices = false;
+                break;
+            }
+        }
+        if (!sorted_indices) {
+            break;
+        }
+    }
 }
 
 template <typename i_t, typename f_t> void problem_analyzer_t<i_t, f_t>::display_analysis() const {
@@ -50,6 +66,7 @@ template <typename i_t, typename f_t> void problem_analyzer_t<i_t, f_t>::display
 
     printf("95th Percentile Block Size per Column: %d\n", block_size_per_col_95);
     printf("99th Percentile Block Size per Column: %d\n", block_size_per_col_99);
+    printf("Indices Sorted: %s\n", sorted_indices ? "Yes" : "No");
 }
 
 template <typename i_t, typename f_t>
