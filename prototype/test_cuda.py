@@ -13,6 +13,7 @@ import numpy as np
 from scipy.optimize import linprog
 import sys
 import time
+import argparse
 
 from dualsimplex import (
     solve_lp, DualSimplexError, 
@@ -20,7 +21,7 @@ from dualsimplex import (
     DEVICE, DTYPE
 )
 
-DEVICE_STR = "cpu"
+DEVICE_STR = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
 
 set_device(DEVICE_STR)
@@ -243,5 +244,19 @@ def test_sparse_gpu_performance():
         return False
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('n_vars', nargs='?', type=int, default=N_VARS,
+                        help=f'Number of variables (default: {N_VARS})')
+    parser.add_argument('n_constraints', nargs='?', type=int, default=N_CONSTRAINTS,
+                        help=f'Number of inequality constraints (default: {N_CONSTRAINTS})')
+    args = parser.parse_args()
+
+    # Override module-level defaults with CLI values
+    N_VARS = args.n_vars
+    N_CONSTRAINTS = args.n_constraints
+
+    print(f"Using problem size from CLI: {N_VARS} variables, {N_CONSTRAINTS} constraints\n")
+
+    # Uncomment to run GPU perf test instead
     # sys.exit(test_gpu_performance())
     sys.exit(test_sparse_gpu_performance())
