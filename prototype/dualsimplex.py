@@ -474,14 +474,14 @@ def dualsimplex(
                 apiv_l[:, ienter].copy_(col_buf)
 
                 # swap bpiv
-                tmp_b = bpiv_l[iexit].item()
-                bpiv_l[iexit] = bpiv_l[ienter]
-                bpiv_l[ienter] = tmp_b
+                tmp_b = bpiv_l[iexit].clone()
+                bpiv_l[iexit].copy_(bpiv_l[ienter])
+                bpiv_l[ienter].copy_(tmp_b)
 
                 # swap jpiv
-                tmp_j = jpiv_l[iexit].item()
-                jpiv_l[iexit] = jpiv_l[ienter]
-                jpiv_l[ienter] = tmp_j
+                tmp_j = jpiv_l[iexit].clone()
+                jpiv_l[iexit].copy_(jpiv_l[ienter])
+                jpiv_l[ienter].copy_(tmp_j)
 
                 # update factorization and resolve
                 if SOLVER == "pinv":
@@ -708,12 +708,12 @@ def dualsimplex(
         _col_buf.copy_(apiv[:, iexit])
         apiv[:, iexit].copy_(apiv[:, ienter])
         apiv[:, ienter].copy_(_col_buf)
-        tmp_b = bpiv[iexit].item()
-        bpiv[iexit] = bpiv[ienter]
-        bpiv[ienter] = tmp_b
-        tmp_j = jpiv[iexit].item()
-        jpiv[iexit] = jpiv[ienter]
-        jpiv[ienter] = tmp_j
+        tmp_b = bpiv[iexit].clone()
+        bpiv[iexit].copy_(bpiv[ienter])
+        bpiv[ienter].copy_(tmp_b)
+        tmp_j = jpiv[iexit].clone()
+        jpiv[iexit].copy_(jpiv[ienter])
+        jpiv[ienter].copy_(tmp_j)
         
         # Update basis inverse using eta transformation or recompute
         if SOLVER == "pinv":
@@ -906,12 +906,14 @@ def feasible_basis(
     basis = basis - n
     
     # Handle degeneracies - ensure all basis elements are legal
-    for i in range(n):
-        if basis[i].item() < 0:
-            idx = 0
-            while idx in basis.tolist():
-                idx += 1
-            basis[i] = idx
+    neg_mask = basis < 0
+    if torch.any(neg_mask):
+        used = torch.zeros(m, device=basis.device, dtype=torch.bool)
+        valid = basis >= 0
+        used[basis[valid]] = True
+        available = torch.nonzero(~used, as_tuple=True)[0]
+        need = int(neg_mask.sum().item())
+        basis[neg_mask] = available[:need]
     
     return basis, 0
 
