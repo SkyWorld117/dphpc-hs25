@@ -739,7 +739,7 @@ __global__ void rank1_update(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
 }
 
 template <typename i_t, typename f_t>
-bool eta_update_inverse(cublasHandle_t cublas_handle, cusparseHandle_t cusparse_handle, i_t m, cusparseSpMatDescr_t &B_pinv_cusparse,
+bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_t &B_pinv_cusparse,
                         i_t *&d_B_pinv_col_ptr, i_t *&d_B_pinv_row_ind, f_t *&d_B_pinv_values,
                         i_t &nz_B_pinv, f_t *eta_b_old, f_t *eta_b_new, f_t *eta_v, f_t *eta_c,
                         f_t *eta_d, const i_t *d_A_col_ptr, const i_t *d_A_row_ind,
@@ -1547,7 +1547,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             //     d_A_col_ptr, d_A_row_ind, d_A_values, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values,
             //     basic_leaving_index, entering_index);
             should_refactor = !phase2_cu::eta_update_inverse(
-                cublas_handle, cusparse_pinv_handle, m, B_pinv_cusparse, d_B_pinv_col_ptr,
+                cublas_handle, m, B_pinv_cusparse, d_B_pinv_col_ptr,
                 d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv, eta_b_old, eta_b_new, eta_v, eta_c,
                 eta_d, d_A_col_ptr, d_A_row_ind, d_A_values, d_B_col_ptr, d_B_row_ind, d_B_values,
                 basic_leaving_index, entering_index);
