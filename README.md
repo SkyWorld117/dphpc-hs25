@@ -4,8 +4,9 @@
 - [x] implement using B_pinv as solver
 - [x] implement assembling B_T, B_T dense on device
 - [x] eta updates for B_pinv
-- [ ] storage efficient implementation of solvers
-- [ ] investigate better ways to store B, Bt and to compute BtB
+- [x] storage efficient implementation of solvers
+- [x] investigate better ways to store B, Bt and to compute BtB
+- [ ] implement customized sparse matrix and vector representations
 
 ## Sophia
 - [x] implement assembling B from A on device
