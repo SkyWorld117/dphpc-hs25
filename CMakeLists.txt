@@ -124,6 +124,10 @@ if(NOT DISABLE_OPENMP)
   endif()
 endif()
 
+# TODO Make nicer later
+find_package(MPI REQUIRED)
+message(STATUS "MPI Found: ${MPI_CXX_FOUND}")
+
 # Debug options
 if(CMAKE_BUILD_TYPE MATCHES Debug)
   message(STATUS "Building with debugging flags")
@@ -236,7 +240,8 @@ set(CUOPT_PRIVATE_CUDA_LIBS
   CUDA::curand
   CUDA::cusolver
   CUDA::cuda_driver
-  OpenMP::OpenMP_CXX)
+  OpenMP::OpenMP_CXX
+  MPI::MPI_CXX)
 
 list(PREPEND CUOPT_PRIVATE_CUDA_LIBS CUDA::cublasLt)
 
@@ -362,6 +367,7 @@ target_link_libraries(cuopt_cli
   PUBLIC
   cuopt
   OpenMP::OpenMP_CXX
+  MPI::MPI_CXX
   argparse::argparse
 )
 set_property(TARGET cuopt_cli PROPERTY INSTALL_RPATH "$ORIGIN/../${lib_dir}")

@@ -179,8 +179,13 @@ lp_status_t solve_linear_program_advanced(const lp_problem_t<i_t, f_t>& original
     edge_norms.clear();
     dual::status_t status;
     if (settings.gpu) {
-      status = dual_phase2_cu(
-        2, iter == 0 ? 1 : 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+      if (settings.parallel_pivoting) {
+        status = dual_phase2_cu_parallel_pivot(
+          2, iter == 0 ? 1 : 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+      } else {
+        status = dual_phase2_cu(
+          2, iter == 0 ? 1 : 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+      }
     } else {
       status = dual_phase2(
         2, iter == 0 ? 1 : 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);

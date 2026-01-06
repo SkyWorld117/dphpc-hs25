@@ -16,6 +16,8 @@
 
 #include <argparse/argparse.hpp>
 
+#include <mpi.h>
+
 #include <iostream>
 #include <string>
 #include <vector>
@@ -98,6 +100,7 @@ mps_to_dual_simplex_user_problem(const cuopt::mps_parser::mps_data_model_t<int, 
 }
 
 int main(int argc, char* argv[]) {
+    MPI_Init(&argc, &argv);
     argparse::ArgumentParser program("cuopt_cli_dual_simplex", "cuOpt minimal dual-simplex CLI");
     program.add_argument("filename").help("input mps file").nargs(1).required();
     program.add_argument("--initial-solution").default_value(std::string(""))
@@ -110,12 +113,15 @@ int main(int argc, char* argv[]) {
         .help("enable GPU acceleration");
     program.add_argument("--pinv-slices").default_value(1).scan<'i', int>()
         .help("number of slices for parallel INVERSE computation");
+    program.add_argument("--parallel-pivoting").default_value(false).implicit_value(true)
+        .help("enable parallel pivoting, which only works using GPU acceleration");
 
     try {
         program.parse_args(argc, argv);
     } catch (const std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
         std::cerr << program;
+        MPI_Finalize();
         return 1;
     }
 
@@ -125,6 +131,7 @@ int main(int argc, char* argv[]) {
     const bool use_highs_presolve = program.get<bool>("--highs-presolve");
     const bool use_gpu = program.get<bool>("--gpu");
     const int pinv_slices = program.get<int>("--pinv-slices");
+    const bool parallel_pivoting = program.get<bool>("--parallel-pivoting");
 
     cuopt::linear_programming::dual_simplex::user_problem_t<int, double> user_problem;
     if (use_highs_presolve) {
@@ -138,6 +145,7 @@ int main(int argc, char* argv[]) {
             mps = cuopt::mps_parser::parse_mps<int, double>(file_name, /*strict=*/false);
         } catch (const std::exception& e) {
             std::cerr << "MPS parse error: " << e.what() << std::endl;
+            MPI_Finalize();
             return 2;
         }
 
@@ -161,6 +169,7 @@ int main(int argc, char* argv[]) {
     settings.profile = profile_enabled;
     settings.gpu = use_gpu;
     settings.pinv_slices = pinv_slices;
+    settings.parallel_pivoting = parallel_pivoting;
 
     cuopt::linear_programming::dual_simplex::lp_solution_t<int, double> solution(
         user_problem.num_rows, user_problem.num_cols);
@@ -205,6 +214,7 @@ int main(int argc, char* argv[]) {
         std::cout << "=== Profile Summary ===\n";
         settings.timer.display(std::cout);
     }
-
+    MPI_Finalize();
+    
     return 0;
 }
