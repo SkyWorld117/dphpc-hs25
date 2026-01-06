@@ -110,6 +110,8 @@ int main(int argc, char* argv[]) {
         .help("enable GPU acceleration");
     program.add_argument("--pinv-slices").default_value(1).scan<'i', int>()
         .help("number of slices for parallel INVERSE computation");
+    program.add_argument("--max-iters").default_value(std::numeric_limits<int>::max()).scan<'i', int>()
+        .help("set maximum iteration limit");
 
     try {
         program.parse_args(argc, argv);
@@ -125,6 +127,7 @@ int main(int argc, char* argv[]) {
     const bool use_highs_presolve = program.get<bool>("--highs-presolve");
     const bool use_gpu = program.get<bool>("--gpu");
     const int pinv_slices = program.get<int>("--pinv-slices");
+    const int max_iters = program.get<int>("--max-iters");
 
     cuopt::linear_programming::dual_simplex::user_problem_t<int, double> user_problem;
     if (use_highs_presolve) {
@@ -161,6 +164,7 @@ int main(int argc, char* argv[]) {
     settings.profile = profile_enabled;
     settings.gpu = use_gpu;
     settings.pinv_slices = pinv_slices;
+    settings.iteration_limit = max_iters;
 
     cuopt::linear_programming::dual_simplex::lp_solution_t<int, double> solution(
         user_problem.num_rows, user_problem.num_cols);

@@ -71,7 +71,7 @@ template <typename i_t, typename f_t> void problem_analyzer_t<i_t, f_t>::display
 
 template <typename i_t, typename f_t>
 void reconstruct_column(const csc_matrix_t<i_t, f_t>& A, std::vector<i_t>& row_indices,
-                        std::vector<f_t>& values, i_t col, i_t max_nnz_per_col) {
+                        std::vector<f_t>& values, i_t col, i_t target_nnz_per_col) {
     i_t m = A.m;
     i_t col_start = A.col_start[col];
     i_t col_end = A.col_start[col + 1];
@@ -83,11 +83,12 @@ void reconstruct_column(const csc_matrix_t<i_t, f_t>& A, std::vector<i_t>& row_i
         existing_entries.push_back({ A.i[p], A.x[p] });
     }
 
-    // If existing entries already exceed or equal max_nnz_per_col, just copy them
-    if (existing_nnz >= max_nnz_per_col) {
-        row_indices.resize(max_nnz_per_col);
-        values.resize(max_nnz_per_col);
-        for (i_t i = 0; i < max_nnz_per_col; ++i) {
+    // If existing entries already exceed or equal target_nnz_per_col, keep all of them (no
+    // truncation)
+    if (existing_nnz >= target_nnz_per_col) {
+        row_indices.resize(existing_nnz);
+        values.resize(existing_nnz);
+        for (i_t i = 0; i < existing_nnz; ++i) {
             row_indices[i] = existing_entries[i].first;
             values[i] = existing_entries[i].second;
         }
@@ -100,12 +101,12 @@ void reconstruct_column(const csc_matrix_t<i_t, f_t>& A, std::vector<i_t>& row_i
     i_t span = max_row - min_row + 1;
 
     // Padding needed
-    i_t padding_needed = max_nnz_per_col - existing_nnz;
+    i_t padding_needed = target_nnz_per_col - existing_nnz;
 
     row_indices.clear();
     values.clear();
-    row_indices.reserve(max_nnz_per_col);
-    values.reserve(max_nnz_per_col);
+    row_indices.reserve(target_nnz_per_col);
+    values.reserve(target_nnz_per_col);
 
     // Copy all existing entries first
     for (const auto& entry : existing_entries) {
@@ -169,35 +170,58 @@ void reconstruct_column(const csc_matrix_t<i_t, f_t>& A, std::vector<i_t>& row_i
 }
 
 template <typename i_t, typename f_t>
-void problem_analyzer_t<i_t, f_t>::construct_preprocessed_A() {
-    // Create a copy of the original matrix A in CSC format
-    // every column should have the same number of non-zeros where nnz = max_nnz_per_col
-    preprocessed_A = csc_matrix_t<i_t, f_t>(lp_problem.A.m, lp_problem.A.n,
-                                            lp_problem.A.col_start[lp_problem.A.n]);
+void problem_analyzer_t<i_t, f_t>::construct_preprocessed_A(const f_t coverage_ratio) {
     const csc_matrix_t<i_t, f_t>& A = lp_problem.A;
-    preprocessed_A.i.resize(A.n * max_nnz_per_col);
-    preprocessed_A.x.resize(A.n * max_nnz_per_col);
+    i_t n = A.n;
+    i_t m = A.m;
 
-    for (i_t j = 0; j < A.n; ++j) {
-        i_t col_start = A.col_start[j];
-        i_t col_end = A.col_start[j + 1];
-        i_t nnz_in_col = col_end - col_start;
+    // Compute the target nnz based on coverage ratio
+    std::vector<i_t> col_counts(n);
+    #pragma omp parallel for
+    for (i_t j = 0; j < n; ++j) {
+        col_counts[j] = A.col_start[j + 1] - A.col_start[j];
+    }
 
-        std::vector<i_t> col_indices(max_nnz_per_col);
-        std::vector<f_t> col_values(max_nnz_per_col);
+    std::vector<i_t> sorted_col_counts = col_counts;
+    std::sort(sorted_col_counts.begin(), sorted_col_counts.end());
+    i_t target_nnz = sorted_col_counts[static_cast<i_t>(coverage_ratio * n)];
 
-        reconstruct_column(A, col_indices, col_values, j, max_nnz_per_col);
+    // First pass: determine actual nnz for each column after padding
+    nnz_per_col.resize(n);
+    #pragma omp parallel for
+    for (i_t j = 0; j < n; ++j) {
+        i_t existing_nnz = col_counts[j];
+        nnz_per_col[j] = (existing_nnz >= target_nnz) ? existing_nnz : target_nnz;
+    }
+
+    // Compute col_start array based on actual nnz per column
+    preprocessed_A.col_start.resize(n + 1);
+    preprocessed_A.col_start[0] = 0;
+    for (i_t j = 0; j < n; ++j) {
+        preprocessed_A.col_start[j + 1] = preprocessed_A.col_start[j] + nnz_per_col[j];
+    }
+
+    i_t total_nnz = preprocessed_A.col_start[n];
+    preprocessed_A.m = m;
+    preprocessed_A.n = n;
+    preprocessed_A.i.resize(total_nnz);
+    preprocessed_A.x.resize(total_nnz);
+
+    // Second pass: fill in the matrix data in parallel
+    #pragma omp parallel for
+    for (i_t j = 0; j < n; ++j) {
+        std::vector<i_t> col_indices;
+        std::vector<f_t> col_values;
+
+        reconstruct_column(A, col_indices, col_values, j, target_nnz);
 
         // Fill in the preprocessed_A matrix
-        i_t pre_col_start = j * max_nnz_per_col;
-        preprocessed_A.col_start[j] = pre_col_start;
-        for (i_t p = 0; p < max_nnz_per_col; ++p) {
+        i_t pre_col_start = preprocessed_A.col_start[j];
+        for (size_t p = 0; p < col_indices.size(); ++p) {
             preprocessed_A.i[pre_col_start + p] = col_indices[p];
             preprocessed_A.x[pre_col_start + p] = col_values[p];
         }
     }
-
-    preprocessed_A.col_start[A.n] = A.n * max_nnz_per_col;
 }
 // Explicit template instantiations
 template class problem_analyzer_t<int, double>;

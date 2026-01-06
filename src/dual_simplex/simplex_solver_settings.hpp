@@ -61,6 +61,7 @@ struct simplex_solver_settings_t {
       refactor_frequency(100),
       pinv_slices(1),
       pinv_buffer_size_multiplier(1.5),
+      analyzer_coverage_ratio(0.99),
       profile(false),
       iteration_log_frequency(1000),
       first_iteration_log(2),
@@ -110,6 +111,7 @@ struct simplex_solver_settings_t {
   i_t refactor_frequency;          // number of basis updates before refactorization
   i_t pinv_slices;                 // number of slices for pseudo-inverse computation
   f_t pinv_buffer_size_multiplier; // buffer size multiplier for pseudo-inverse computation
+  f_t analyzer_coverage_ratio;     // coverage ratio for problem analyzer
   i_t iteration_log_frequency;     // number of iterations between log updates
   i_t first_iteration_log;         // number of iterations to log at beginning of solve
   i_t num_threads;                 // number of threads to use

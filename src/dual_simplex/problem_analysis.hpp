@@ -12,10 +12,11 @@ template <typename i_t, typename f_t> class problem_analyzer_t {
         : lp_problem(problem), solver_settings(settings), preprocessed_A(0, 0, 0) {}
 
     void analyze();
-    void construct_preprocessed_A();
+    void construct_preprocessed_A(const f_t coverage_ratio);
     void display_analysis() const;
 
     csc_matrix_t<i_t, f_t> preprocessed_A;
+    std::vector<i_t> nnz_per_col;
 
     i_t max_nnz_per_col = 0;
 
