@@ -679,11 +679,35 @@ spmv_csc_atomic_free_kernel(i_t n, i_t m, const i_t *__restrict__ col_ptr,
 }
 
 template <typename i_t, typename f_t>
+__global__ void mark_nnz_mask(i_t m, const f_t *__restrict__ values, i_t *__restrict__ flags,
+                              f_t threshold) {
+    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= m)
+        return;
+    flags[idx] = (abs(values[idx]) > threshold) ? 1 : 0;
+}
+
+template <typename i_t, typename f_t>
+__global__ void scatter_compact(i_t m, const f_t *__restrict__ values, const i_t *__restrict__ flags,
+                                const i_t *__restrict__ prefix, i_t *__restrict__ nz_indices,
+                                f_t *__restrict__ nz_values) {
+    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= m)
+        return;
+    if (flags[idx]) {
+        i_t pos = prefix[idx];
+        nz_indices[pos] = idx;
+        nz_values[pos] = values[idx];
+    }
+}
+
+template <typename i_t, typename f_t>
 __global__ void rank1_symbolic(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
                                const i_t *__restrict__ d_B_pinv_row_ind,
-                               const f_t *__restrict__ d_vector_U_values,
-                               const f_t *__restrict__ d_vector_V_values, i_t *d_new_B_pinv_col_ptr,
-                               const f_t scale) {
+                               const i_t *__restrict__ d_U_row_ind, const f_t *__restrict__ d_U_values,
+                               i_t nnz_U, const i_t *__restrict__ d_V_col_ind,
+                               const f_t *__restrict__ d_V_values, i_t nnz_V,
+                               i_t *d_new_B_pinv_col_ptr, const f_t scale) {
     // Assuming U @ V^T rank-1 update
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m)
@@ -691,29 +715,31 @@ __global__ void rank1_symbolic(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
 
     // Parallelize over columns of V
     // If V[idx] is non-zero, merge B_pinv_row_ind with U's non-zero rows
-    f_t v_val = d_vector_V_values[idx];
+    i_t v_pos = binary_search(nnz_V, d_V_col_ind, idx);
+    f_t v_val = (v_pos >= 0) ? d_V_values[v_pos] : f_t(0);
+    f_t col_scale = v_val * scale;
     i_t col_start = d_B_pinv_col_ptr[idx];
     i_t col_end = d_B_pinv_col_ptr[idx + 1];
     i_t nnz_in_col = col_end - col_start;
 
-    if (abs(v_val) * abs(scale) > 1e-12) {
+    if (abs(col_scale) > 1e-12) {
         // Count new nnz due to U using merge
         i_t i = col_start;
         i_t j = 0; // index for U
-        while (i < col_end || j < m) {
+        while (i < col_end || j < nnz_U) {
             i_t row_idx_B = (i < col_end) ? d_B_pinv_row_ind[i] : m + 1;
-            i_t row_idx_U = (j < m) ? j : m + 1;
+            i_t row_idx_U = (j < nnz_U) ? d_U_row_ind[j] : m + 1;
             if (i < col_end && (row_idx_B < row_idx_U)) {
                 // From B_pinv
                 i++;
-            } else if (j < m && (row_idx_U < row_idx_B)) {
+            } else if (j < nnz_U && (row_idx_U < row_idx_B)) {
                 // From U
-                f_t u_val = d_vector_U_values[j];
-                if (abs(u_val) * abs(v_val) * abs(scale) > 1e-12) {
+                f_t u_val = d_U_values[j];
+                if (abs(u_val * col_scale) > 1e-12) {
                     nnz_in_col++;
                 }
                 j++;
-            } else if (i < col_end && j < m && (row_idx_B == row_idx_U)) {
+            } else if (i < col_end && j < nnz_U && (row_idx_B == row_idx_U)) {
                 // Both have the same row index
                 i++;
                 j++;
@@ -731,47 +757,51 @@ __global__ void rank1_update(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
                              const i_t *__restrict__ d_B_pinv_row_ind,
                              const f_t *__restrict__ d_B_pinv_values, i_t *d_new_B_pinv_col_ptr,
                              i_t *d_new_B_pinv_row_ind, f_t *d_new_B_pinv_values,
-                             f_t *d_vector_U_values, f_t *d_vector_V_values, const f_t scale) {
+                             const i_t *__restrict__ d_U_row_ind, const f_t *__restrict__ d_U_values,
+                             i_t nnz_U, const i_t *__restrict__ d_V_col_ind,
+                             const f_t *__restrict__ d_V_values, i_t nnz_V, const f_t scale) {
     // Assuming U @ V^T rank-1 update
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m)
         return;
 
     // Parallelize over columns of V
-    f_t v_val = d_vector_V_values[idx];
+    i_t v_pos = binary_search(nnz_V, d_V_col_ind, idx);
+    f_t v_val = (v_pos >= 0) ? d_V_values[v_pos] : f_t(0);
+    f_t col_scale = v_val * scale;
     i_t col_start = d_B_pinv_col_ptr[idx];
     i_t col_end = d_B_pinv_col_ptr[idx + 1];
     i_t write_offset = d_new_B_pinv_col_ptr[idx];
 
-    if (abs(v_val) * abs(scale) > 1e-12) {
+    if (abs(col_scale) > 1e-12) {
         // Merge B_pinv column with U's non-zero rows in sorted order
         i_t i = col_start;
         i_t j = 0; // index for U
-        while (i < col_end || j < m) {
+        while (i < col_end || j < nnz_U) {
             i_t row_idx_B = (i < col_end) ? d_B_pinv_row_ind[i] : m + 1;
-            i_t row_idx_U = (j < m) ? j : m + 1;
+            i_t row_idx_U = (j < nnz_U) ? d_U_row_ind[j] : m + 1;
             if (i < col_end && (row_idx_B < row_idx_U)) {
                 // Copy from B_pinv
                 d_new_B_pinv_row_ind[write_offset] = d_B_pinv_row_ind[i];
                 d_new_B_pinv_values[write_offset] = d_B_pinv_values[i];
                 i++;
                 write_offset++;
-            } else if (j < m && (row_idx_U < row_idx_B)) {
+            } else if (j < nnz_U && (row_idx_U < row_idx_B)) {
                 // Copy from U
-                f_t u_val = d_vector_U_values[j];
-                if (abs(v_val) * abs(u_val) * abs(scale) > 1e-12) {
+                f_t u_val = d_U_values[j];
+                if (abs(col_scale * u_val) > 1e-12) {
                     d_new_B_pinv_row_ind[write_offset] = row_idx_U;
-                    d_new_B_pinv_values[write_offset] = scale * u_val * v_val;
+                    d_new_B_pinv_values[write_offset] = col_scale * u_val;
                     write_offset++;
                 }
                 j++;
-            } else if (i < col_end && j < m && (row_idx_B == row_idx_U)) {
+            } else if (i < col_end && j < nnz_U && (row_idx_B == row_idx_U)) {
                 // Both have the same row index
                 d_new_B_pinv_row_ind[write_offset] = row_idx_B;
                 d_new_B_pinv_values[write_offset] = d_B_pinv_values[i];
-                f_t u_val = d_vector_U_values[j];
-                if (abs(v_val) * abs(u_val) * abs(scale) > 1e-12) {
-                    d_new_B_pinv_values[write_offset] += scale * u_val * v_val;
+                f_t u_val = d_U_values[j];
+                if (abs(col_scale * u_val) > 1e-12) {
+                    d_new_B_pinv_values[write_offset] += col_scale * u_val;
                 }
                 i++;
                 j++;
@@ -886,6 +916,76 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
 
     // B_inv = B_inv - (p @ row_j) / denom
     f_t scale = -1.0 / denom;
+
+    // Build sparse representation of eta_v (U) once to avoid scanning dense rows per column
+    const f_t u_nz_threshold = 1e-20;
+    i_t *d_u_flags = nullptr;
+    i_t *d_u_prefix = nullptr;
+    i_t *d_U_row_ind_tmp = nullptr;
+    f_t *d_U_values_tmp = nullptr;
+    const f_t v_nz_threshold = 1e-20;
+    i_t *d_v_flags = nullptr;
+    i_t *d_v_prefix = nullptr;
+    i_t *d_V_col_ind_tmp = nullptr;
+    f_t *d_V_values_tmp = nullptr;
+
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_u_flags, m * sizeof(i_t)), "cudaMalloc d_u_flags");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_u_prefix, m * sizeof(i_t)), "cudaMalloc d_u_prefix");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_U_row_ind_tmp, m * sizeof(i_t)), "cudaMalloc d_U_row_ind_tmp");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_U_values_tmp, m * sizeof(f_t)), "cudaMalloc d_U_values_tmp");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_v_flags, m * sizeof(i_t)), "cudaMalloc d_v_flags");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_v_prefix, m * sizeof(i_t)), "cudaMalloc d_v_prefix");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_V_col_ind_tmp, m * sizeof(i_t)), "cudaMalloc d_V_col_ind_tmp");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_V_values_tmp, m * sizeof(f_t)), "cudaMalloc d_V_values_tmp");
+
+    grid_size = (m + block_size - 1) / block_size;
+    mark_nnz_mask<<<grid_size, block_size>>>(m, eta_v, d_u_flags, u_nz_threshold);
+    CUDA_CALL_AND_CHECK(cudaGetLastError(), "mark_nnz_mask eta_v");
+
+    thrust::device_ptr<i_t> u_flags_ptr = thrust::device_pointer_cast(d_u_flags);
+    thrust::device_ptr<i_t> u_prefix_ptr = thrust::device_pointer_cast(d_u_prefix);
+    thrust::exclusive_scan(thrust::cuda::par, u_flags_ptr, u_flags_ptr + m, u_prefix_ptr, i_t(0));
+
+    i_t last_prefix = 0;
+    i_t last_flag = 0;
+    CUDA_CALL_AND_CHECK(
+        cudaMemcpy(&last_prefix, d_u_prefix + m - 1, sizeof(i_t), cudaMemcpyDeviceToHost),
+        "cudaMemcpy last_prefix for U");
+    CUDA_CALL_AND_CHECK(
+        cudaMemcpy(&last_flag, d_u_flags + m - 1, sizeof(i_t), cudaMemcpyDeviceToHost),
+        "cudaMemcpy last_flag for U");
+
+    i_t nnz_U = last_prefix + last_flag;
+    if (nnz_U > 0) {
+        scatter_compact<<<grid_size, block_size>>>(m, eta_v, d_u_flags, d_u_prefix, d_U_row_ind_tmp,
+                                                   d_U_values_tmp);
+        CUDA_CALL_AND_CHECK(cudaGetLastError(), "scatter_compact eta_v");
+    }
+
+    // Build sparse representation of eta_d (V)
+    mark_nnz_mask<<<grid_size, block_size>>>(m, eta_d, d_v_flags, v_nz_threshold);
+    CUDA_CALL_AND_CHECK(cudaGetLastError(), "mark_nnz_mask eta_d");
+
+    thrust::device_ptr<i_t> v_flags_ptr = thrust::device_pointer_cast(d_v_flags);
+    thrust::device_ptr<i_t> v_prefix_ptr = thrust::device_pointer_cast(d_v_prefix);
+    thrust::exclusive_scan(thrust::cuda::par, v_flags_ptr, v_flags_ptr + m, v_prefix_ptr, i_t(0));
+
+    i_t last_prefix_v = 0;
+    i_t last_flag_v = 0;
+    CUDA_CALL_AND_CHECK(
+        cudaMemcpy(&last_prefix_v, d_v_prefix + m - 1, sizeof(i_t), cudaMemcpyDeviceToHost),
+        "cudaMemcpy last_prefix for V");
+    CUDA_CALL_AND_CHECK(
+        cudaMemcpy(&last_flag_v, d_v_flags + m - 1, sizeof(i_t), cudaMemcpyDeviceToHost),
+        "cudaMemcpy last_flag for V");
+
+    i_t nnz_V = last_prefix_v + last_flag_v;
+    if (nnz_V > 0) {
+        scatter_compact<<<grid_size, block_size>>>(m, eta_d, d_v_flags, d_v_prefix, d_V_col_ind_tmp,
+                                                   d_V_values_tmp);
+        CUDA_CALL_AND_CHECK(cudaGetLastError(), "scatter_compact eta_d");
+    }
+
     // Custom kernel to perform sparse rank-1 update
     // 1. Count the additional number of non-zeros introduced
     if (settings.profile) {
@@ -895,7 +995,9 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
     CUDA_CALL_AND_CHECK(cudaMemset(d_new_B_pinv_col_ptr, 0, (m + 1) * sizeof(i_t)),
                         "cudaMemset d_new_B_pinv_col_ptr");
     grid_size = (m + block_size - 1) / block_size;
-    rank1_symbolic<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind, eta_v, eta_d,
+    rank1_symbolic<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind,
+                                              d_U_row_ind_tmp, d_U_values_tmp, nnz_U,
+                                              d_V_col_ind_tmp, d_V_values_tmp, nnz_V,
                                               d_new_B_pinv_col_ptr, scale);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "get_rank1_delta_nnz_nnz kernel");
     if (settings.profile) {
@@ -937,7 +1039,8 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
     grid_size = (m + block_size - 1) / block_size;
     rank1_update<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values,
                                             d_new_B_pinv_col_ptr, d_new_B_pinv_row_ind,
-                                            d_new_B_pinv_values, eta_v, eta_d, scale);
+                                            d_new_B_pinv_values, d_U_row_ind_tmp, d_U_values_tmp,
+                                            nnz_U, d_V_col_ind_tmp, d_V_values_tmp, nnz_V, scale);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "rank1_csc_update kernel");
     if (settings.profile) {
         cudaDeviceSynchronize();
@@ -965,6 +1068,15 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
         cudaDeviceSynchronize();
         settings.timer.stop("Eta Update cleanup");
     }
+
+    CUDA_CALL_AND_CHECK(cudaFree(d_u_flags), "cudaFree d_u_flags");
+    CUDA_CALL_AND_CHECK(cudaFree(d_u_prefix), "cudaFree d_u_prefix");
+    CUDA_CALL_AND_CHECK(cudaFree(d_U_row_ind_tmp), "cudaFree d_U_row_ind_tmp");
+    CUDA_CALL_AND_CHECK(cudaFree(d_U_values_tmp), "cudaFree d_U_values_tmp");
+    CUDA_CALL_AND_CHECK(cudaFree(d_v_flags), "cudaFree d_v_flags");
+    CUDA_CALL_AND_CHECK(cudaFree(d_v_prefix), "cudaFree d_v_prefix");
+    CUDA_CALL_AND_CHECK(cudaFree(d_V_col_ind_tmp), "cudaFree d_V_col_ind_tmp");
+    CUDA_CALL_AND_CHECK(cudaFree(d_V_values_tmp), "cudaFree d_V_values_tmp");
 
     return true; // Successful update
 }
