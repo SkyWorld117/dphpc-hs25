@@ -940,12 +940,12 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
                                             d_new_B_pinv_values, eta_v, eta_d, scale);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "rank1_csc_update kernel");
     if (settings.profile) {
-        // cudaDeviceSynchronize();
+        cudaDeviceSynchronize();
         settings.timer.stop("Eta Update rank-1 step 3");
     }
     // 4. Clean up and update pointers
     if (settings.profile) {
-        // cudaDeviceSynchronize();
+        cudaDeviceSynchronize();
         settings.timer.start("Eta Update cleanup");
     }
     std::swap(d_B_pinv_col_ptr, d_new_B_pinv_col_ptr);
