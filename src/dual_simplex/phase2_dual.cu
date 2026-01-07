@@ -1559,6 +1559,7 @@ i_t initialize_steepest_edge_norms(const lp_problem_t<i_t, f_t> &lp,
         }
     }
     i_t num_singleton_rows = 0;
+#pragma omp parallel for reduction(+ : num_singleton_rows)
     for (i_t i = 0; i < m; ++i) {
         if (row_degree[i] == 1) {
             num_singleton_rows++;

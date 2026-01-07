@@ -373,7 +373,8 @@ void compute_reduced_cost_update(const lp_problem_t<i_t, f_t>& lp,
     const i_t m = lp.num_rows;
     const i_t n = lp.num_cols;
 
-    // delta_zB = sigma*ei
+// delta_zB = sigma*ei
+#pragma omp parallel for
     for (i_t k = 0; k < m; k++) {
         const i_t j = basic_list[k];
         delta_z[j] = 0;
@@ -466,12 +467,14 @@ void compute_reduced_costs(const std::vector<f_t>& objective, const csc_matrix_t
         const i_t col_start = A.col_start[j];
         const i_t col_end = A.col_start[j + 1];
         f_t dot = 0.0;
+        // #pragma omp parallel for reduction(+ : dot)
         for (i_t p = col_start; p < col_end; ++p) {
             dot += A.x[p] * y[A.i[p]];
         }
         z[j] -= dot;
     }
-    // zB = 0
+// zB = 0
+#pragma omp parallel for
     for (i_t k = 0; k < m; ++k) {
         z[basic_list[k]] = 0.0;
     }
@@ -504,6 +507,7 @@ void compute_primal_variables(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
     //   ft.b_solve(rhs, xB);
     phase2::pinv_solve<i_t, f_t>(cublas_handle, d_B_pinv, rhs, xB, m, false);
 
+#pragma omp parallel for
     for (i_t k = 0; k < m; ++k) {
         const i_t j = basic_list[k];
         x[j] = xB[k];
@@ -513,6 +517,7 @@ void compute_primal_variables(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
 template <typename i_t, typename f_t>
 void clear_delta_z(i_t entering_index, i_t leaving_index, std::vector<i_t>& delta_z_mark,
                    std::vector<i_t>& delta_z_indices, std::vector<f_t>& delta_z) {
+#pragma omp parallel for
     for (i_t k = 0; k < (i_t) (delta_z_indices.size()); k++) {
         const i_t j = delta_z_indices[k];
         delta_z[j] = 0.0;
@@ -529,6 +534,7 @@ template <typename i_t, typename f_t>
 void clear_delta_x(const std::vector<i_t>& basic_list, i_t entering_index,
                    sparse_vector_t<i_t, f_t>& scaled_delta_xB_sparse, std::vector<f_t>& delta_x) {
     const i_t scaled_delta_xB_nz = scaled_delta_xB_sparse.i.size();
+#pragma omp parallel for
     for (i_t k = 0; k < scaled_delta_xB_nz; ++k) {
         const i_t j = basic_list[scaled_delta_xB_sparse.i[k]];
         delta_x[j] = 0.0;
@@ -545,7 +551,8 @@ void compute_dual_residual(const csc_matrix_t<i_t, f_t>& A, const std::vector<f_
                            std::vector<f_t>& dual_residual) {
     dual_residual = z;
     const i_t n = A.n;
-    // r = A'*y + z  - c
+// r = A'*y + z  - c
+#pragma omp parallel for
     for (i_t j = 0; j < n; ++j) {
         dual_residual[j] -= objective[j];
     }
@@ -696,6 +703,7 @@ f_t compute_initial_primal_infeasibilities(const lp_problem_t<i_t, f_t>& lp,
     infeasibility_indices.reserve(n);
     infeasibility_indices.clear();
     f_t primal_inf = 0.0;
+#pragma omp parallel for reduction(+ : primal_inf)
     for (i_t k = 0; k < m; ++k) {
         const i_t j = basic_list[k];
         const f_t lower_infeas = lp.lower[j] - x[j];
@@ -1098,11 +1106,13 @@ void initialize_steepest_edge_norms_from_slack_basis(const std::vector<i_t>& bas
                                                      std::vector<f_t>& delta_y_steepest_edge) {
     const i_t m = basic_list.size();
     const i_t n = delta_y_steepest_edge.size();
+#pragma omp parallel for
     for (i_t k = 0; k < m; ++k) {
         const i_t j = basic_list[k];
         delta_y_steepest_edge[j] = 1.0;
     }
     const i_t n_minus_m = n - m;
+#pragma omp parallel for
     for (i_t k = 0; k < n_minus_m; ++k) {
         const i_t j = nonbasic_list[k];
         delta_y_steepest_edge[j] = 1e-4;
@@ -1415,18 +1425,22 @@ void reset_basis_mark(const std::vector<i_t>& basic_list, const std::vector<i_t>
     const i_t n = nonbasic_mark.size();
     const i_t n_minus_m = n - m;
 
+#pragma omp parallel for
     for (i_t k = 0; k < n; k++) {
         basic_mark[k] = -1;
     }
 
+#pragma omp parallel for
     for (i_t k = 0; k < n; k++) {
         nonbasic_mark[k] = -1;
     }
 
+#pragma omp parallel for
     for (i_t k = 0; k < n_minus_m; k++) {
         nonbasic_mark[nonbasic_list[k]] = k;
     }
 
+#pragma omp parallel for
     for (i_t k = 0; k < m; k++) {
         basic_mark[basic_list[k]] = k;
     }
@@ -1475,12 +1489,14 @@ void update_dual_variables(const sparse_vector_t<i_t, f_t>& delta_y_sparse,
     // Update dual variables
     // y <- y + steplength * delta_y
     const i_t delta_y_nz = delta_y_sparse.i.size();
+#pragma omp parallel for
     for (i_t k = 0; k < delta_y_nz; ++k) {
         const i_t i = delta_y_sparse.i[k];
         y[i] += step_length * delta_y_sparse.x[k];
     }
     // z <- z + steplength * delta_z
     const i_t delta_z_nz = delta_z_indices.size();
+#pragma omp parallel for
     for (i_t k = 0; k < delta_z_nz; ++k) {
         const i_t j = delta_z_indices[k];
         z[j] += step_length * delta_z[j];
@@ -1690,6 +1706,7 @@ f_t primal_infeasibility(const lp_problem_t<i_t, f_t>& lp,
                          const std::vector<variable_status_t>& vstatus, const std::vector<f_t>& x) {
     const i_t n = lp.num_cols;
     f_t primal_inf = 0;
+#pragma omp parallel for reduction(+ : primal_inf)
     for (i_t j = 0; j < n; ++j) {
         if (x[j] < lp.lower[j]) {
             // x_j < l_j => -x_j > -l_j => -x_j + l_j > 0
@@ -1917,6 +1934,7 @@ template <typename f_t>
 f_t compute_perturbed_objective(const std::vector<f_t>& objective, const std::vector<f_t>& x) {
     const size_t n = objective.size();
     f_t obj_val = 0.0;
+#pragma omp parallel for reduction(+ : obj_val)
     for (size_t j = 0; j < n; ++j) {
         obj_val += objective[j] * x[j];
     }
