@@ -1884,9 +1884,12 @@ i_t compute_primal_solution_from_basis(const lp_problem_t<i_t, f_t> &lp, f_t *d_
     }
 
     f_t *d_x;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_x, m * sizeof(f_t)), "cudaMalloc d_x");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_x, n * sizeof(f_t)), "cudaMalloc d_x");
     CUDA_CALL_AND_CHECK(cudaMemcpy(d_x, x.data(), n * sizeof(f_t), cudaMemcpyHostToDevice),
                         "cudaMemcpy x to d_x");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(d_lp_rhs, lp.rhs.data(), m * sizeof(f_t), cudaMemcpyHostToDevice),
+                        "cudaMemcpy lp.rhs to d_lp_rhs");
+
 
     // rhs = b - sum_{j : x_j = l_j} A(:, j) l(j)
     // - sum_{j : x_j = u_j} A(:, j) * u(j)
@@ -2146,6 +2149,9 @@ __global__ void sparse_vector_squared_norm_kernel(i_t nz, const i_t *d_indices, 
 
 template <typename i_t, typename f_t>
 f_t sparse_vector_squared_norm_gpu(i_t nz, const i_t *d_indices, const f_t *d_values) {
+    if (nz == 0) {
+        return 0.0;
+    }
     const i_t block_size = 256;
     i_t grid_size = (nz + block_size - 1) / block_size;
     f_t *d_partial_sums;
@@ -2386,7 +2392,6 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDA_CALL_AND_CHECK(cudaMemcpy(y.data(), d_y, m * sizeof(f_t), cudaMemcpyDeviceToHost),
                         "cudaMemcpy y to host");
     CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
-    CUDA_CALL_AND_CHECK(cudaFree(d_lp_rhs), "cudaFree d_lp_rhs");
 
     if (toc(start_time) > settings.time_limit) {
         return dual::status_t::TIME_LIMIT;
@@ -3028,6 +3033,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDA_CALL_AND_CHECK(cudaFree(d_objective), "cudaFree d_objective");
     CUDA_CALL_AND_CHECK(cudaFree(d_temp_vector_m), "cudaFree d_temp_vector_m");
     CUDA_CALL_AND_CHECK(cudaFree(d_c_basic), "cudaFree d_c_basic");
+    CUDA_CALL_AND_CHECK(cudaFree(d_lp_rhs), "cudaFree d_lp_rhs");
     CUDA_CALL_AND_CHECK(cudaFree(d_y), "cudaFree d_y");
     CUDA_CALL_AND_CHECK(cudaFree(d_z), "cudaFree d_z");
 
