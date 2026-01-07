@@ -2341,7 +2341,7 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
     simplex_solver_settings_t<i_t, f_t> local_settings = settings;
 
     // Define the "Sync Frequency" (How many pivots before we compare notes?)
-    const i_t SYNC_INTERVAL = 1000; 
+    i_t SYNC_INTERVAL = 1000; 
     const i_t global_iter_limit = settings.iteration_limit;
 
     // Rank 0: Default Strategy
@@ -2422,7 +2422,7 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
              // 1. Receive the winning Basis
              // Note: MPI needs raw pointers. Ensure vstatus is a vector of ints/enums 
              // compatible with MPI_INT. If variable_status_t is 8-bit, use MPI_BYTE.
-             MPI_Bcast(vstatus.data(), vstatus.size(), MPI_INT, winner_info.rank, MPI_COMM_WORLD);
+             MPI_Bcast(vstatus.data(), vstatus.size() * sizeof(variable_status_t), MPI_BYTE, winner_info.rank, MPI_COMM_WORLD);
              settings.log.printf("Using results from thread %d, after iteration %d \n", rank, iter);
              // 2. CRITICAL: Reset Weights ("Cold Start" Fix)
              // Since we have a new basis but old weights, we MUST clear this 
@@ -2433,9 +2433,12 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
              MPI_Bcast(&iter, 1, MPI_INT, winner_info.rank, MPI_COMM_WORLD);
         } else {
              // I am the winner. Broadcast my basis to the others.
-             MPI_Bcast(vstatus.data(), vstatus.size(), MPI_INT, rank, MPI_COMM_WORLD);
+             MPI_Bcast(vstatus.data(), vstatus.size() * sizeof(variable_status_t), MPI_BYTE, rank, MPI_COMM_WORLD);
              
              // I keep my 'delta_y_steepest_edge' because it matches my basis.
+
+             // Sync iteration count 
+             MPI_Bcast(&iter, 1, MPI_INT, rank, MPI_COMM_WORLD);
         }
 
         // Check for global timeout
