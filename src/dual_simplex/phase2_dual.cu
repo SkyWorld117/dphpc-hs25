@@ -12,6 +12,9 @@
 #include <thrust/scan.h>
 #include <vector>
 
+#include <dual_simplex/sparse_matrix.cuh>
+#include <dual_simplex/sparse_vector.cuh>
+
 namespace cuopt::linear_programming::dual_simplex {
 
 namespace phase2_cu {
@@ -280,8 +283,8 @@ template <typename i_t, typename f_t>
 void compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_handle,
                      cudssConfig_t &cudss_config, i_t m, i_t n, const i_t *d_A_col_ptr,
                      const i_t *d_A_row_ind, const f_t *d_A_values, i_t *&d_B_col_ptr,
-                     i_t *&d_B_row_ind, f_t *&d_B_values, 
-                     i_t *&d_X_col_ptr, i_t *&d_X_row_ind, f_t *&d_X_values, i_t &nz_B, i_t &nz_X, i_t &max_nz_X,
+                     i_t *&d_B_row_ind, f_t *&d_B_values, i_t *&d_X_col_ptr, i_t *&d_X_row_ind,
+                     f_t *&d_X_values, i_t &nz_B, i_t &nz_X, i_t &max_nz_X,
                      const simplex_solver_settings_t<i_t, f_t> &settings) {
     // Here we assume (B^T B) is also sparse
     i_t *d_BtB_row_ptr = nullptr;
@@ -469,7 +472,8 @@ void compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_han
         max_nz_X = nz_B_pinv * settings.pinv_buffer_size_multiplier;
         CUDA_CALL_AND_CHECK(cudaMalloc(&d_X_row_ind, max_nz_X * sizeof(i_t)),
                             "cudaMalloc d_X_row_ind");
-        CUDA_CALL_AND_CHECK(cudaMalloc(&d_X_values, max_nz_X * sizeof(f_t)), "cudaMalloc d_X_values");
+        CUDA_CALL_AND_CHECK(cudaMalloc(&d_X_values, max_nz_X * sizeof(f_t)),
+                            "cudaMalloc d_X_values");
     }
     i_t offset = 0;
     for (i_t slice_idx = 0; slice_idx < settings.pinv_slices; ++slice_idx) {
@@ -532,8 +536,8 @@ void fetch_column_as_dense(i_t m, i_t col_idx, const i_t *d_B_col_ptr, const i_t
     CUDA_CALL_AND_CHECK(cudaMemset(col_dense, 0, m * sizeof(f_t)), "cudaMemset col_dense");
     int block_size = 32;
     int grid_size = (m + block_size - 1) / block_size;
-    fetch_column_as_dense_kernel<<<grid_size, block_size>>>(
-        m, col_idx, d_B_col_ptr, d_B_row_ind, d_B_values, col_dense);
+    fetch_column_as_dense_kernel<<<grid_size, block_size>>>(m, col_idx, d_B_col_ptr, d_B_row_ind,
+                                                            d_B_values, col_dense);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "fetch_column_as_dense_kernel");
 }
 
@@ -688,9 +692,9 @@ __global__ void mark_nnz_mask(i_t m, const f_t *__restrict__ values, i_t *__rest
 }
 
 template <typename i_t, typename f_t>
-__global__ void scatter_compact(i_t m, const f_t *__restrict__ values, const i_t *__restrict__ flags,
-                                const i_t *__restrict__ prefix, i_t *__restrict__ nz_indices,
-                                f_t *__restrict__ nz_values) {
+__global__ void scatter_compact(i_t m, const f_t *__restrict__ values,
+                                const i_t *__restrict__ flags, const i_t *__restrict__ prefix,
+                                i_t *__restrict__ nz_indices, f_t *__restrict__ nz_values) {
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m)
         return;
@@ -702,12 +706,12 @@ __global__ void scatter_compact(i_t m, const f_t *__restrict__ values, const i_t
 }
 
 template <typename i_t, typename f_t>
-__global__ void rank1_symbolic(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
-                               const i_t *__restrict__ d_B_pinv_row_ind,
-                               const i_t *__restrict__ d_U_row_ind, const f_t *__restrict__ d_U_values,
-                               i_t nnz_U, const i_t *__restrict__ d_V_col_ind,
-                               const f_t *__restrict__ d_V_values, i_t nnz_V,
-                               i_t *d_new_B_pinv_col_ptr, const f_t scale) {
+__global__ void
+rank1_symbolic(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
+               const i_t *__restrict__ d_B_pinv_row_ind, const i_t *__restrict__ d_U_row_ind,
+               const f_t *__restrict__ d_U_values, i_t nnz_U, const i_t *__restrict__ d_V_col_ind,
+               const f_t *__restrict__ d_V_values, i_t nnz_V, i_t *d_new_B_pinv_col_ptr,
+               const f_t scale) {
     // Assuming U @ V^T rank-1 update
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m)
@@ -753,13 +757,13 @@ __global__ void rank1_symbolic(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
 }
 
 template <typename i_t, typename f_t>
-__global__ void rank1_update(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
-                             const i_t *__restrict__ d_B_pinv_row_ind,
-                             const f_t *__restrict__ d_B_pinv_values, i_t *d_new_B_pinv_col_ptr,
-                             i_t *d_new_B_pinv_row_ind, f_t *d_new_B_pinv_values,
-                             const i_t *__restrict__ d_U_row_ind, const f_t *__restrict__ d_U_values,
-                             i_t nnz_U, const i_t *__restrict__ d_V_col_ind,
-                             const f_t *__restrict__ d_V_values, i_t nnz_V, const f_t scale) {
+__global__ void
+rank1_update(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
+             const i_t *__restrict__ d_B_pinv_row_ind, const f_t *__restrict__ d_B_pinv_values,
+             i_t *d_new_B_pinv_col_ptr, i_t *d_new_B_pinv_row_ind, f_t *d_new_B_pinv_values,
+             const i_t *__restrict__ d_U_row_ind, const f_t *__restrict__ d_U_values, i_t nnz_U,
+             const i_t *__restrict__ d_V_col_ind, const f_t *__restrict__ d_V_values, i_t nnz_V,
+             const f_t scale) {
     // Assuming U @ V^T rank-1 update
     i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= m)
@@ -821,24 +825,35 @@ __global__ void rank1_update(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
 }
 
 template <typename i_t, typename f_t>
-bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_t &B_pinv_cusparse,
-                        i_t *&d_B_pinv_col_ptr, i_t *&d_B_pinv_row_ind, f_t *&d_B_pinv_values,
-                        i_t *&d_new_B_pinv_col_ptr, i_t *&d_new_B_pinv_row_ind, f_t *&d_new_B_pinv_values,
-                        i_t &nz_B_pinv, i_t &max_nz_B_pinv, i_t &max_nz_new_B_pinv, f_t *eta_b_old, f_t *eta_b_new, f_t *eta_v, f_t *eta_c,
-                        f_t *eta_d, const i_t *d_A_col_ptr, const i_t *d_A_row_ind,
-                        const f_t *d_A_values, const i_t *d_B_col_ptr, const i_t *d_B_row_ind,
-                        const f_t *d_B_values, i_t basic_leaving_index, i_t entering_index, const simplex_solver_settings_t<i_t, f_t> &settings) {
+bool eta_update_inverse(i_t m, cusparseSpMatDescr_t &B_pinv_cusparse,
+                        csc_cu_matrix<i_t, f_t> &mat_B_pinv, i_t *&d_B_pinv_col_ptr,
+                        i_t *&d_B_pinv_row_ind, f_t *&d_B_pinv_values, i_t &nz_B_pinv, i_t *&d_new_B_pinv_col_ptr,
+                        i_t *&d_new_B_pinv_row_ind, f_t *&d_new_B_pinv_values,
+                        i_t &max_nz_new_B_pinv, cu_vector<i_t, f_t> &vec_b_old,
+                        cu_vector<i_t, f_t> &vec_b_new, cu_vector<i_t, f_t> &vec_v,
+                        cu_vector<i_t, f_t> &vec_c, cu_vector<i_t, f_t> &vec_d,
+                        csc_cu_matrix<i_t, f_t> &mat_A, csc_cu_matrix<i_t, f_t> &mat_B,
+                        i_t basic_leaving_index, i_t entering_index,
+                        const simplex_solver_settings_t<i_t, f_t> &settings) {
     const i_t j = basic_leaving_index; // Index of leaving variable in basis
 
     if (settings.profile) {
         cudaDeviceSynchronize();
         settings.timer.start("Eta Update fetch columns");
     }
+    
+    // Reset vectors before reuse to clear stale data
+    // NOTE: We MUST zero out the device memory, not just set nnz=0, to avoid
+    // thrust operations seeing stale data when memory addresses are reused
+    vec_b_old.reset();
+    vec_b_new.reset();
+    vec_c.reset();
+    vec_v.reset();
+    vec_d.reset();
+
     // Fetch b_old and b_new as dense vectors
-    phase2_cu::fetch_column_as_dense(m, basic_leaving_index, d_B_col_ptr, d_B_row_ind, d_B_values,
-                                     eta_b_old);
-    phase2_cu::fetch_column_as_dense(m, entering_index, d_A_col_ptr, d_A_row_ind, d_A_values,
-                                     eta_b_new);
+    mat_B.fetch_column(basic_leaving_index, vec_b_old);
+    mat_A.fetch_column(entering_index, vec_b_new);
     if (settings.profile) {
         cudaDeviceSynchronize();
         settings.timer.stop("Eta Update fetch columns");
@@ -858,41 +873,26 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
         cudaDeviceSynchronize();
         settings.timer.start("Eta Update compute vectors");
     }
-    f_t alpha, beta;
 
     // Compute u = b_new - b_old (store in eta_c
     // temporarily)
-    CUDA_CALL_AND_CHECK(cudaMemcpy(eta_c, eta_b_new, m * sizeof(f_t), cudaMemcpyDeviceToDevice),
-                        "cudaMemcpy eta_c = b_new");
-    alpha = -1.0;
-    CUBLAS_CALL_AND_CHECK(cublasDaxpy(cublas_handle, m, &alpha, eta_b_old, 1, eta_c, 1),
-                          "cublasDaxpy compute u = b_new - b_old");
+    vec_b_new.subtract(vec_b_old, vec_c);
 
     // Compute p = B_inv @ u
     // Note: eta_p already contains B_inv @ b_old
     // from the caller So we need to recompute: p
     // = B_inv @ (b_new - b_old)
-    alpha = 1.0;
-    beta = 0.0;
 
     // Use custom CSC SpMV kernel for B_inv @ u
-    // First, initialize output vector with beta * y
-    CUDA_CALL_AND_CHECK(cudaMemset(eta_v, 0, m * sizeof(f_t)), "cudaMemset eta_v to zero");
+    mat_B_pinv.spmv_sparse(vec_c, vec_v);
 
-    // Launch spmv_csc_kernel
-    i_t block_size = 256;
-    i_t grid_size = (m + block_size - 1) / block_size;
-    spmv_csc_kernel<<<grid_size, block_size>>>(m, m, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                               d_B_pinv_values,
-                                               eta_c, // input vector (u = b_new - b_old)
-                                               eta_v, // output vector (p = B_inv @ u)
-                                               alpha, beta);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "spmv_csc_kernel launch");
+    if (vec_v.nnz == 0) {
+        // There is nothing to update - B_inv remains the same
+        return true;
+    }
 
     // Get p[j] and compute denominator: 1 + p[j]
-    f_t p_j;
-    CUDA_CALL_AND_CHECK(cudaMemcpy(&p_j, eta_v + j, sizeof(f_t), cudaMemcpyDeviceToHost),
-                        "cudaMemcpy p_j from device");
+    f_t p_j = vec_v.get(j);
     f_t denom = 1.0 + p_j;
 
     if (std::abs(denom) < 1e-10) {
@@ -901,90 +901,20 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
         return false;
     }
 
-    // Kernel parameters
-    block_size = 256;
-    grid_size = (m + block_size - 1) / block_size;
-
     // Extract row j of B_inv (store in eta_d)
     // B_inv is column-major, so row j is at offsets j, j+m, j+2m, ...
-    phase2_cu::fetch_row_as_dense(m, j, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, eta_d,
-                                  0);
+    mat_B_pinv.fetch_row(j, vec_d);
+    if (vec_d.nnz == 0) {
+        // There is nothing to update - B_inv remains the same
+        return true;
+    }
+
     if (settings.profile) {
         cudaDeviceSynchronize();
         settings.timer.stop("Eta Update compute vectors");
     }
 
-    // B_inv = B_inv - (p @ row_j) / denom
     f_t scale = -1.0 / denom;
-
-    // Build sparse representation of eta_v (U) once to avoid scanning dense rows per column
-    const f_t u_nz_threshold = 1e-20;
-    i_t *d_u_flags = nullptr;
-    i_t *d_u_prefix = nullptr;
-    i_t *d_U_row_ind_tmp = nullptr;
-    f_t *d_U_values_tmp = nullptr;
-    const f_t v_nz_threshold = 1e-20;
-    i_t *d_v_flags = nullptr;
-    i_t *d_v_prefix = nullptr;
-    i_t *d_V_col_ind_tmp = nullptr;
-    f_t *d_V_values_tmp = nullptr;
-
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_u_flags, m * sizeof(i_t)), "cudaMalloc d_u_flags");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_u_prefix, m * sizeof(i_t)), "cudaMalloc d_u_prefix");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_U_row_ind_tmp, m * sizeof(i_t)), "cudaMalloc d_U_row_ind_tmp");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_U_values_tmp, m * sizeof(f_t)), "cudaMalloc d_U_values_tmp");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_v_flags, m * sizeof(i_t)), "cudaMalloc d_v_flags");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_v_prefix, m * sizeof(i_t)), "cudaMalloc d_v_prefix");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_V_col_ind_tmp, m * sizeof(i_t)), "cudaMalloc d_V_col_ind_tmp");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_V_values_tmp, m * sizeof(f_t)), "cudaMalloc d_V_values_tmp");
-
-    grid_size = (m + block_size - 1) / block_size;
-    mark_nnz_mask<<<grid_size, block_size>>>(m, eta_v, d_u_flags, u_nz_threshold);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "mark_nnz_mask eta_v");
-
-    thrust::device_ptr<i_t> u_flags_ptr = thrust::device_pointer_cast(d_u_flags);
-    thrust::device_ptr<i_t> u_prefix_ptr = thrust::device_pointer_cast(d_u_prefix);
-    thrust::exclusive_scan(thrust::cuda::par, u_flags_ptr, u_flags_ptr + m, u_prefix_ptr, i_t(0));
-
-    i_t last_prefix = 0;
-    i_t last_flag = 0;
-    CUDA_CALL_AND_CHECK(
-        cudaMemcpy(&last_prefix, d_u_prefix + m - 1, sizeof(i_t), cudaMemcpyDeviceToHost),
-        "cudaMemcpy last_prefix for U");
-    CUDA_CALL_AND_CHECK(
-        cudaMemcpy(&last_flag, d_u_flags + m - 1, sizeof(i_t), cudaMemcpyDeviceToHost),
-        "cudaMemcpy last_flag for U");
-
-    i_t nnz_U = last_prefix + last_flag;
-    if (nnz_U > 0) {
-        scatter_compact<<<grid_size, block_size>>>(m, eta_v, d_u_flags, d_u_prefix, d_U_row_ind_tmp,
-                                                   d_U_values_tmp);
-        CUDA_CALL_AND_CHECK(cudaGetLastError(), "scatter_compact eta_v");
-    }
-
-    // Build sparse representation of eta_d (V)
-    mark_nnz_mask<<<grid_size, block_size>>>(m, eta_d, d_v_flags, v_nz_threshold);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "mark_nnz_mask eta_d");
-
-    thrust::device_ptr<i_t> v_flags_ptr = thrust::device_pointer_cast(d_v_flags);
-    thrust::device_ptr<i_t> v_prefix_ptr = thrust::device_pointer_cast(d_v_prefix);
-    thrust::exclusive_scan(thrust::cuda::par, v_flags_ptr, v_flags_ptr + m, v_prefix_ptr, i_t(0));
-
-    i_t last_prefix_v = 0;
-    i_t last_flag_v = 0;
-    CUDA_CALL_AND_CHECK(
-        cudaMemcpy(&last_prefix_v, d_v_prefix + m - 1, sizeof(i_t), cudaMemcpyDeviceToHost),
-        "cudaMemcpy last_prefix for V");
-    CUDA_CALL_AND_CHECK(
-        cudaMemcpy(&last_flag_v, d_v_flags + m - 1, sizeof(i_t), cudaMemcpyDeviceToHost),
-        "cudaMemcpy last_flag for V");
-
-    i_t nnz_V = last_prefix_v + last_flag_v;
-    if (nnz_V > 0) {
-        scatter_compact<<<grid_size, block_size>>>(m, eta_d, d_v_flags, d_v_prefix, d_V_col_ind_tmp,
-                                                   d_V_values_tmp);
-        CUDA_CALL_AND_CHECK(cudaGetLastError(), "scatter_compact eta_d");
-    }
 
     // Custom kernel to perform sparse rank-1 update
     // 1. Count the additional number of non-zeros introduced
@@ -994,11 +924,11 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
     }
     CUDA_CALL_AND_CHECK(cudaMemset(d_new_B_pinv_col_ptr, 0, (m + 1) * sizeof(i_t)),
                         "cudaMemset d_new_B_pinv_col_ptr");
-    grid_size = (m + block_size - 1) / block_size;
-    rank1_symbolic<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                              d_U_row_ind_tmp, d_U_values_tmp, nnz_U,
-                                              d_V_col_ind_tmp, d_V_values_tmp, nnz_V,
-                                              d_new_B_pinv_col_ptr, scale);
+    i_t block_size = 256;
+    i_t grid_size = (m + block_size - 1) / block_size;
+    rank1_symbolic<<<grid_size, block_size>>>(
+        m, mat_B_pinv.d_col_ptrs, mat_B_pinv.d_row_indices, vec_v.d_indices, vec_v.d_values,
+        vec_v.nnz, vec_d.d_indices, vec_d.d_values, vec_d.nnz, d_new_B_pinv_col_ptr, scale);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "get_rank1_delta_nnz_nnz kernel");
     if (settings.profile) {
         cudaDeviceSynchronize();
@@ -1020,12 +950,10 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
         CUDA_CALL_AND_CHECK(cudaFree(d_new_B_pinv_row_ind), "cudaFree d_new_B_pinv_row_ind");
         CUDA_CALL_AND_CHECK(cudaFree(d_new_B_pinv_values), "cudaFree d_new_B_pinv_values");
         max_nz_new_B_pinv = nz_new_B_pinv * settings.pinv_buffer_size_multiplier;
-        CUDA_CALL_AND_CHECK(
-            cudaMalloc(&d_new_B_pinv_row_ind, max_nz_new_B_pinv * sizeof(i_t)),
-            "cudaMalloc d_new_B_pinv_row_ind");
-        CUDA_CALL_AND_CHECK(
-            cudaMalloc(&d_new_B_pinv_values, max_nz_new_B_pinv * sizeof(f_t)),
-            "cudaMalloc d_new_B_pinv_values");
+        CUDA_CALL_AND_CHECK(cudaMalloc(&d_new_B_pinv_row_ind, max_nz_new_B_pinv * sizeof(i_t)),
+                            "cudaMalloc d_new_B_pinv_row_ind");
+        CUDA_CALL_AND_CHECK(cudaMalloc(&d_new_B_pinv_values, max_nz_new_B_pinv * sizeof(f_t)),
+                            "cudaMalloc d_new_B_pinv_values");
     }
     if (settings.profile) {
         cudaDeviceSynchronize();
@@ -1037,10 +965,10 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
         settings.timer.start("Eta Update rank-1 step 3");
     }
     grid_size = (m + block_size - 1) / block_size;
-    rank1_update<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values,
-                                            d_new_B_pinv_col_ptr, d_new_B_pinv_row_ind,
-                                            d_new_B_pinv_values, d_U_row_ind_tmp, d_U_values_tmp,
-                                            nnz_U, d_V_col_ind_tmp, d_V_values_tmp, nnz_V, scale);
+    rank1_update<<<grid_size, block_size>>>(
+        m, mat_B_pinv.d_col_ptrs, mat_B_pinv.d_row_indices, mat_B_pinv.d_values,
+        d_new_B_pinv_col_ptr, d_new_B_pinv_row_ind, d_new_B_pinv_values, vec_v.d_indices,
+        vec_v.d_values, vec_v.nnz, vec_d.d_indices, vec_d.d_values, vec_d.nnz, scale);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "rank1_csc_update kernel");
     if (settings.profile) {
         cudaDeviceSynchronize();
@@ -1051,32 +979,30 @@ bool eta_update_inverse(cublasHandle_t cublas_handle, i_t m, cusparseSpMatDescr_
         cudaDeviceSynchronize();
         settings.timer.start("Eta Update cleanup");
     }
-    std::swap(d_B_pinv_col_ptr, d_new_B_pinv_col_ptr);
-    std::swap(d_B_pinv_row_ind, d_new_B_pinv_row_ind);
-    std::swap(d_B_pinv_values, d_new_B_pinv_values);
-    std::swap(max_nz_B_pinv, max_nz_new_B_pinv);
+    std::swap(mat_B_pinv.d_col_ptrs, d_new_B_pinv_col_ptr);
+    std::swap(mat_B_pinv.d_row_indices, d_new_B_pinv_row_ind);
+    std::swap(mat_B_pinv.d_values, d_new_B_pinv_values);
+    std::swap(mat_B_pinv.max_nz, max_nz_new_B_pinv);
+    mat_B_pinv.nnz = nz_new_B_pinv;
     nz_B_pinv = nz_new_B_pinv;
+
+    // CRITICAL: Also update the external pointers to stay in sync
+    d_B_pinv_col_ptr = mat_B_pinv.d_col_ptrs;
+    d_B_pinv_row_ind = mat_B_pinv.d_row_indices;
+    d_B_pinv_values = mat_B_pinv.d_values;
+
     // Update cusparse matrix descriptor
     CUSPARSE_CALL_AND_CHECK(cusparseDestroySpMat(B_pinv_cusparse),
                             "cusparseDestroySpMat B_pinv_cusparse");
-    CUSPARSE_CALL_AND_CHECK(cusparseCreateCsc(&B_pinv_cusparse, m, m, nz_B_pinv, d_B_pinv_col_ptr,
-                                              d_B_pinv_row_ind, d_B_pinv_values, CUSPARSE_INDEX_32I,
-                                              CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO,
-                                              CUDA_R_64F),
-                            "cusparseCreateCSCMat B_pinv_cusparse");
+    CUSPARSE_CALL_AND_CHECK(
+        cusparseCreateCsc(&B_pinv_cusparse, m, m, mat_B_pinv.nnz, mat_B_pinv.d_col_ptrs,
+                          mat_B_pinv.d_row_indices, mat_B_pinv.d_values, CUSPARSE_INDEX_32I,
+                          CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F),
+        "cusparseCreateCSCMat B_pinv_cusparse");
     if (settings.profile) {
         cudaDeviceSynchronize();
         settings.timer.stop("Eta Update cleanup");
     }
-
-    CUDA_CALL_AND_CHECK(cudaFree(d_u_flags), "cudaFree d_u_flags");
-    CUDA_CALL_AND_CHECK(cudaFree(d_u_prefix), "cudaFree d_u_prefix");
-    CUDA_CALL_AND_CHECK(cudaFree(d_U_row_ind_tmp), "cudaFree d_U_row_ind_tmp");
-    CUDA_CALL_AND_CHECK(cudaFree(d_U_values_tmp), "cudaFree d_U_values_tmp");
-    CUDA_CALL_AND_CHECK(cudaFree(d_v_flags), "cudaFree d_v_flags");
-    CUDA_CALL_AND_CHECK(cudaFree(d_v_prefix), "cudaFree d_v_prefix");
-    CUDA_CALL_AND_CHECK(cudaFree(d_V_col_ind_tmp), "cudaFree d_V_col_ind_tmp");
-    CUDA_CALL_AND_CHECK(cudaFree(d_V_values_tmp), "cudaFree d_V_values_tmp");
 
     return true; // Successful update
 }
@@ -1468,6 +1394,9 @@ void compute_delta_y(cusparseHandle_t &cusparse_handle, const i_t *d_B_pinv_col_
                         "cudaMemcpy nnz");
 
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "extract_sparse_row kernel for delta_y");
+
+    // Free temporary memory
+    CUDA_CALL_AND_CHECK(cudaFree(d_nnz), "cudaFree d_nnz");
 }
 
 template <typename i_t, typename f_t>
@@ -2293,16 +2222,16 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     i_t *d_A_row_ind;
     f_t *d_A_values;
     phase2_cu::move_A_to_device(analyzer.preprocessed_A, d_A_col_ptr, d_A_row_ind, d_A_values);
+    csc_cu_matrix<i_t, f_t> mat_A(m, n, analyzer.preprocessed_A.col_start[n],
+                                  analyzer.preprocessed_A.col_start[n], d_A_col_ptr, d_A_row_ind,
+                                  d_A_values);
 
-    // Create dense vectors for eta updates
-    // TODO: remove once we have dense sparse mv
-    // on device
-    f_t *eta_b_old, *eta_b_new, *eta_v, *eta_c, *eta_d;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_b_old, m * sizeof(f_t)), "cudaMalloc eta_b_old");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_b_new, m * sizeof(f_t)), "cudaMalloc eta_b_new");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_v, m * sizeof(f_t)), "cudaMalloc eta_v");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_c, m * sizeof(f_t)), "cudaMalloc eta_c");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&eta_d, m * sizeof(f_t)), "cudaMalloc eta_d");
+    // Create sparse vectors for eta updates
+    cu_vector<i_t, f_t> vec_b_old(m, m);
+    cu_vector<i_t, f_t> vec_b_new(m, m);
+    cu_vector<i_t, f_t> vec_v(m, m);
+    cu_vector<i_t, f_t> vec_c(m, m);
+    cu_vector<i_t, f_t> vec_d(m, m);
 
     // Compute Moore-Penrose pseudo-inverse of B
     i_t *d_B_col_ptr;
@@ -2311,7 +2240,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     i_t nz_B;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_col_ptr, (m + 1) * sizeof(i_t)), "cudaMalloc d_B_col_ptr");
     phase2_cu::build_basis_on_device(m, d_A_col_ptr, d_A_row_ind, d_A_values, d_basic_list,
-                                   d_B_col_ptr, d_B_row_ind, d_B_values, nz_B);
+                                     d_B_col_ptr, d_B_row_ind, d_B_values, nz_B);
+    csc_cu_matrix<i_t, f_t> mat_B(m, m, nz_B, nz_B, d_B_col_ptr, d_B_row_ind, d_B_values);
 
     i_t len_B_pinv = 0;
     i_t *d_B_pinv_col_ptr;
@@ -2322,8 +2252,10 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                         "cudaMalloc d_B_pinv_col_ptr");
     phase2_cu::compute_inverse<i_t, f_t>(
         cusparse_handle, cudss_handle, cudss_config, m, n, d_A_col_ptr, d_A_row_ind, d_A_values,
-        d_B_col_ptr, d_B_row_ind, d_B_values, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-        d_B_pinv_values, nz_B, nz_B_pinv, len_B_pinv, settings);
+        d_B_col_ptr, d_B_row_ind, d_B_values, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values,
+        nz_B, nz_B_pinv, len_B_pinv, settings);
+    csc_cu_matrix<i_t, f_t> mat_B_pinv(m, m, nz_B_pinv, nz_B_pinv, d_B_pinv_col_ptr,
+                                       d_B_pinv_row_ind, d_B_pinv_values);
 
     // We pre-allocate buffer for eta updates
     i_t len_B_pinv_buffer = static_cast<i_t>(settings.pinv_buffer_size_multiplier * nz_B_pinv);
@@ -2936,14 +2868,17 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             }
 
             // should_refactor = !phase2_cu::eta_update_inverse(
-            //     cublas_handle, m, d_B_pinv, eta_b_old, eta_b_new, eta_v, eta_c, eta_d,
-            //     d_A_col_ptr, d_A_row_ind, d_A_values, d_Bt_row_ptr, d_Bt_col_ind, d_Bt_values,
-            //     basic_leaving_index, entering_index);
+            //     cublas_handle, m, n, B_pinv_cusparse, d_B_pinv_col_ptr, d_B_pinv_row_ind,
+            //     d_B_pinv_values, d_B_pinv_col_ptr_buffer, d_B_pinv_row_ind_buffer,
+            //     d_B_pinv_values_buffer, nz_B_pinv, len_B_pinv, len_B_pinv_buffer, eta_b_old,
+            //     eta_b_new, eta_v, eta_c, eta_d, d_A_col_ptr, d_A_row_ind, d_A_values,
+            //     d_B_col_ptr, d_B_row_ind, d_B_values, basic_leaving_index, entering_index,
+            //     settings);
             should_refactor = !phase2_cu::eta_update_inverse(
-                cublas_handle, m, B_pinv_cusparse, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                d_B_pinv_values, d_B_pinv_col_ptr_buffer, d_B_pinv_row_ind_buffer, d_B_pinv_values_buffer, nz_B_pinv, len_B_pinv, len_B_pinv_buffer, eta_b_old, eta_b_new, eta_v, eta_c, eta_d, d_A_col_ptr,
-                d_A_row_ind, d_A_values, d_B_col_ptr, d_B_row_ind, d_B_values, basic_leaving_index,
-                entering_index, settings);
+                m, B_pinv_cusparse, mat_B_pinv, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv,
+                d_B_pinv_col_ptr_buffer, d_B_pinv_row_ind_buffer, d_B_pinv_values_buffer,
+                len_B_pinv_buffer, vec_b_old, vec_b_new, vec_v, vec_c, vec_d, mat_A, mat_B,
+                basic_leaving_index, entering_index, settings);
 
             if (settings.profile) {
                 cudaDeviceSynchronize();
@@ -2955,7 +2890,8 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             cudaDeviceSynchronize();
             settings.timer.start("Inverse Update B");
         }
-        bool should_rebuild_B = analyzer.nnz_per_col[entering_index] != analyzer.nnz_per_col[leaving_index];
+        bool should_rebuild_B =
+            analyzer.nnz_per_col[entering_index] != analyzer.nnz_per_col[leaving_index];
 
         if (should_rebuild_B) {
             if (settings.profile) {
@@ -2968,6 +2904,13 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
 
             phase2_cu::build_basis_on_device(m, d_A_col_ptr, d_A_row_ind, d_A_values, d_basic_list,
                                              d_B_col_ptr, d_B_row_ind, d_B_values, nz_B);
+            
+            // Update mat_B to point to the new memory
+            mat_B.d_row_indices = d_B_row_ind;
+            mat_B.d_values = d_B_values;
+            mat_B.nnz = nz_B;
+            mat_B.max_nz = nz_B;
+            
             if (settings.profile) {
                 settings.timer.stop("Rebuild B");
             }
@@ -2977,20 +2920,17 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             }
             // Copy A column of entering variable into B
             i_t B_col_offset = 0;
-            CUDA_CALL_AND_CHECK(
-                cudaMemcpy(&B_col_offset, d_B_col_ptr + basic_leaving_index, sizeof(i_t),
-                           cudaMemcpyDeviceToHost),
-                "cudaMemcpy B_col_offset to host");
+            CUDA_CALL_AND_CHECK(cudaMemcpy(&B_col_offset, d_B_col_ptr + basic_leaving_index,
+                                           sizeof(i_t), cudaMemcpyDeviceToHost),
+                                "cudaMemcpy B_col_offset to host");
             i_t copy_len = analyzer.nnz_per_col[entering_index];
             i_t A_col_offset = analyzer.preprocessed_A.col_start[entering_index];
-            CUDA_CALL_AND_CHECK(
-                cudaMemcpy(d_B_row_ind + B_col_offset, d_A_row_ind + A_col_offset,
-                           copy_len * sizeof(i_t), cudaMemcpyDeviceToDevice),
-                "cudaMemcpy B_row_ind column");
-            CUDA_CALL_AND_CHECK(
-                cudaMemcpy(d_B_values + B_col_offset, d_A_values + A_col_offset,
-                           copy_len * sizeof(f_t), cudaMemcpyDeviceToDevice),
-                "cudaMemcpy B_values column");
+            CUDA_CALL_AND_CHECK(cudaMemcpy(d_B_row_ind + B_col_offset, d_A_row_ind + A_col_offset,
+                                           copy_len * sizeof(i_t), cudaMemcpyDeviceToDevice),
+                                "cudaMemcpy B_row_ind column");
+            CUDA_CALL_AND_CHECK(cudaMemcpy(d_B_values + B_col_offset, d_A_values + A_col_offset,
+                                           copy_len * sizeof(f_t), cudaMemcpyDeviceToDevice),
+                                "cudaMemcpy B_values column");
             if (settings.profile) {
                 settings.timer.stop("Update B");
             }
@@ -3012,15 +2952,19 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                 d_A_values, d_B_col_ptr, d_B_row_ind, d_B_values, d_B_pinv_col_ptr,
                 d_B_pinv_row_ind, d_B_pinv_values, nz_B, nz_B_pinv, len_B_pinv, settings);
 
+            mat_B_pinv.d_col_ptrs = d_B_pinv_col_ptr;
+            mat_B_pinv.d_row_indices = d_B_pinv_row_ind;
+            mat_B_pinv.d_values = d_B_pinv_values;
+            mat_B_pinv.nnz = nz_B_pinv;
+            mat_B_pinv.max_nz = len_B_pinv;
+
             CUSPARSE_CALL_AND_CHECK(cusparseDestroySpMat(B_pinv_cusparse),
                                     "cusparseDestroyMatDescr B_pinv");
-            CUSPARSE_CALL_AND_CHECK(cusparseCreateCsc(&B_pinv_cusparse, m, m, nz_B_pinv,
-                                                            d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                                            d_B_pinv_values,
-                                                            CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                                                            CUSPARSE_INDEX_BASE_ZERO,
-                                                            CUDA_R_64F),
-                                    "cusparseCreateCsc B_pinv");
+            CUSPARSE_CALL_AND_CHECK(
+                cusparseCreateCsc(&B_pinv_cusparse, m, m, nz_B_pinv, d_B_pinv_col_ptr,
+                                  d_B_pinv_row_ind, d_B_pinv_values, CUSPARSE_INDEX_32I,
+                                  CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F),
+                "cusparseCreateCsc B_pinv");
 
             // phase2::reset_basis_mark(basic_list, nonbasic_list, basic_mark, nonbasic_mark);
             // phase2::compute_initial_primal_infeasibilities(
@@ -3075,9 +3019,11 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         }
 
         // End of iteration cleanup
-        CUDA_CALL_AND_CHECK(cudaFree(d_delta_y_sparse_indices), "cudaFree d_delta_y_sparse_indices");
+        CUDA_CALL_AND_CHECK(cudaFree(d_delta_y_sparse_indices),
+                            "cudaFree d_delta_y_sparse_indices");
         CUDA_CALL_AND_CHECK(cudaFree(d_delta_y_sparse_values), "cudaFree d_delta_y_sparse_values");
-        CUDA_CALL_AND_CHECK(cudaFree(d_delta_z_sparse_indices), "cudaFree d_delta_z_sparse_indices");
+        CUDA_CALL_AND_CHECK(cudaFree(d_delta_z_sparse_indices),
+                            "cudaFree d_delta_z_sparse_indices");
         CUDA_CALL_AND_CHECK(cudaFree(d_delta_z_sparse_values), "cudaFree d_delta_z_sparse_values");
     }
     if (iter >= iter_limit) {

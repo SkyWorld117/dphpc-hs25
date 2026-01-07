@@ -31,13 +31,20 @@ db_path = 'build/compile_commands.json'
 if os.path.exists(db_path):
     with open(db_path, 'r') as f:
         data = json.load(f)
+
+    cufiles = [
+        'src/dual_simplex/sparse_matrix.cu',
+        'src/dual_simplex/sparse_vector.cu',
+        'src/dual_simplex/phase2_dual.cu'
+    ]
     
-    target_file = '$PWD/src/dual_simplex/phase2_dual.cu'
-    new_cmd = '$FROMAGER_ENV/system/bin/nvcc -O3 -DNDEBUG -lineinfo -std=c++17 -Werror=cross-execution-space-call -Wno-deprecated-declarations -Wno-error=non-template-friend -fopenmp -lineinfo -x cu -c $PWD/src/dual_simplex/phase2_dual.cu -o CMakeFiles/cuopt.dir/src/dual_simplex/phase2_dual.cu.o'
-    
-    for entry in data:
-        if entry['file'] == target_file:
-            entry['command'] = new_cmd
+    for cufile in cufiles:
+        target_file = '$PWD' + '/' + cufile
+        new_cmd = '$FROMAGER_ENV/system/bin/nvcc -O3 -DNDEBUG -lineinfo -std=c++17 -Werror=cross-execution-space-call -Wno-deprecated-declarations -Wno-error=non-template-friend -fopenmp -lineinfo -x cu -c ' + target_file + ' -o CMakeFiles/cuopt.dir/' + cufile + '.o'
+        
+        for entry in data:
+            if entry['file'] == target_file:
+                entry['command'] = new_cmd
             
     with open(db_path, 'w') as f:
         json.dump(data, f, indent=2)
