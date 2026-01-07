@@ -1990,7 +1990,11 @@ void prepare_optimality(const lp_problem_t<i_t, f_t> &lp,
     }
     if (phase == 2) {
         if (!settings.inside_mip) {
-            settings.log.printf("\n");
+
+            int rank;
+            MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+            settings.log.printf("\n[%d] ==================\n", rank);
             settings.log.printf("Optimal solution found in %d "
                                 "iterations and %.2fs\n",
                                 iter, toc(start_time));
@@ -2005,6 +2009,7 @@ void prepare_optimality(const lp_problem_t<i_t, f_t> &lp,
             settings.log.printf("Perturbation:               "
                                 "%.2e\n",
                                 perturbation);
+            settings.log.printf("[%d] ==================\n", rank);
         } else {
             settings.log.printf("\n");
             settings.log.printf("Root relaxation solution found "
@@ -2164,7 +2169,7 @@ struct DualSimplexWorkspace {
 
 
 template <typename i_t, typename f_t>
-void initialize_workspace(DualSimplexWorkspace<i_t, f_t> &ws, 
+void initialize_workspace(int rank, DualSimplexWorkspace<i_t, f_t> &ws, 
                           const lp_problem_t<i_t, f_t> &lp, 
                           const simplex_solver_settings_t<i_t, f_t> &settings) {
     
@@ -2190,9 +2195,11 @@ void initialize_workspace(DualSimplexWorkspace<i_t, f_t> &ws,
 
     // TODO jujupieper make sure this makes sense here
     // Analyze matrix A
-    problem_analyzer_t<i_t, f_t> analyzer(lp, settings);
-    analyzer.analyze();
-    analyzer.display_analysis();
+    if(rank == 0) {
+        problem_analyzer_t<i_t, f_t> analyzer(lp, settings);
+        analyzer.analyze();
+        analyzer.display_analysis();
+    }
 
     // 2. Move Static Matrix A (Only done ONCE now!)
     phase2_cu::move_A_to_device(lp.A, ws.d_A_col_ptr, ws.d_A_row_ind, ws.d_A_values);
@@ -2320,6 +2327,8 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+    settings.log.printf("\n\n\n[%d] Beginning the interesting MPI part", rank);
+
     // Assign a specific GPU to this MPI rank (Round-Robin)
     int num_gpus = 0;
     cudaGetDeviceCount(&num_gpus);
@@ -2331,9 +2340,7 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
 
     // TODO jujupieper create the necessary mallocs
     DualSimplexWorkspace<i_t, f_t> workspace;
-    initialize_workspace(workspace, lp, settings);
-
-
+    initialize_workspace(rank, workspace, lp, settings);
 
     // --- 2. LOCAL CONFIGURATION (The "Strategy Divergence") ---
     // We make a local copy of settings so we can modify limits and pivot rules per rank.
@@ -2352,7 +2359,7 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
         local_settings.use_steepest_edge_pricing = false;
 
         // Assuming that max-infeasibility pricing will take less time 
-        SYNC_INTERVAL = 2000;
+        SYNC_INTERVAL = 1000;
 
         // Keep all other parameters identical unless you explicitly want divergence.
         // local_settings.steepest_edge_ratio = settings.steepest_edge_ratio;
@@ -2368,7 +2375,7 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
         // We tell the inner solver to stop after SYNC_INTERVAL steps 
         // OR if it hits the global limit.
         local_settings.iteration_limit = std::min(iter + SYNC_INTERVAL, global_iter_limit);
-        settings.log.printf("Thread %d, iteration %d \n", rank, iter);
+        settings.log.printf("[%d] Continuing at %d iterations\n", rank, iter);
 
         // B. Run the Solver (The "Worker" Phase)
         // This will run until it hits local_settings.iteration_limit or finds OPTIMAL.
@@ -2423,7 +2430,7 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
              // Note: MPI needs raw pointers. Ensure vstatus is a vector of ints/enums 
              // compatible with MPI_INT. If variable_status_t is 8-bit, use MPI_BYTE.
              MPI_Bcast(vstatus.data(), vstatus.size() * sizeof(variable_status_t), MPI_BYTE, winner_info.rank, MPI_COMM_WORLD);
-             settings.log.printf("Using results from thread %d, after iteration %d \n", rank, iter);
+             settings.log.printf("[%d] Using the rank %d's results after having wasted %d iterations\n", rank, winner_info.rank, SYNC_INTERVAL);
              
              // 2. CRITICAL: Also sync the primal solution vector
              // The basis (vstatus) changed, but sol.x must match! Otherwise we have an inconsistent state.
@@ -2441,7 +2448,8 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
         } else {
              // I am the winner. Broadcast my basis to the others.
              MPI_Bcast(vstatus.data(), vstatus.size() * sizeof(variable_status_t), MPI_BYTE, rank, MPI_COMM_WORLD);
-             
+             settings.log.printf("[%d] Won after a total of %d iterations\n", rank, iter);
+
              // Sync the primal solution vector
              MPI_Bcast(sol.x.data(), sol.x.size() * sizeof(f_t), MPI_BYTE, rank, MPI_COMM_WORLD);
              // Sync objective value
@@ -2495,8 +2503,6 @@ dual::status_t dual_phase2_cu_persistent(int rank, i_t phase, i_t slack_basis, f
 
     // Perturbed objective
     std::vector<f_t> objective = lp.objective;
-
-    settings.log.printf("Dual Simplex Phase %d on rank %d\n", phase, rank);
     std::vector<variable_status_t> vstatus_old = vstatus;
     std::vector<f_t> z_old = z;
 
@@ -2709,13 +2715,13 @@ dual::status_t dual_phase2_cu_persistent(int rank, i_t phase, i_t slack_basis, f
             }
         }
     } else {
-        settings.log.printf("using exisiting steepest edge %e\n",
-                            vector_norm2<i_t, f_t>(delta_y_steepest_edge));
+        settings.log.printf("[%d] using exisiting steepest edge %e\n",
+                            rank, vector_norm2<i_t, f_t>(delta_y_steepest_edge));
     }
 
     if (phase == 2) {
-        settings.log.printf(" Iter     Objective           Num "
-                            "Inf.  Sum Inf.     Perturb  Time\n");
+        settings.log.printf("[%d]Iter     Objective           Num "
+                            "Inf.  Sum Inf.     Perturb  Time\n", rank);
     }
 
     const i_t iter_limit = settings.iteration_limit;

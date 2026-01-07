@@ -178,42 +178,51 @@ int main(int argc, char* argv[]) {
     settings.timer.start("Dual Simplex Solve");
     auto status = cuopt::linear_programming::dual_simplex::solve_linear_program(user_problem, settings, solution);
     settings.timer.stop("Dual Simplex Solve");
-    settings.timer.display(std::cout, "Dual Simplex Solve");
 
-    std::cout << "Status: ";
-    switch (status) {
-        case cuopt::linear_programming::dual_simplex::lp_status_t::OPTIMAL:
-            std::cout << "OPTIMAL\n";
-            break;
-        case cuopt::linear_programming::dual_simplex::lp_status_t::INFEASIBLE:
-            std::cout << "INFEASIBLE\n";
-            break;
-        case cuopt::linear_programming::dual_simplex::lp_status_t::UNBOUNDED:
-            std::cout << "UNBOUNDED\n";
-            break;
-        case cuopt::linear_programming::dual_simplex::lp_status_t::TIME_LIMIT:
-            std::cout << "TIME_LIMIT\n";
-            break;
-        case cuopt::linear_programming::dual_simplex::lp_status_t::ITERATION_LIMIT:
-            std::cout << "ITERATION_LIMIT\n";
-            break;
-        case cuopt::linear_programming::dual_simplex::lp_status_t::NUMERICAL_ISSUES:
-            std::cout << "NUMERICAL_ISSUES\n";
-            break;
-        default:
-            std::cout << "OTHER\n";
-            break;
-    }
+    // Get MPI rank to control output
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    if (!std::isnan(solution.user_objective)) {
-        std::cout << "Objective (user): " << solution.user_objective << "\n";
-    }
-    std::cout << "Iterations: " << solution.iterations << "\n";
+    // Only rank 0 prints final results
+    if (rank == 0) {
+        settings.timer.display(std::cout, "Dual Simplex Solve");
 
-    if (profile_enabled) {
-        std::cout << "=== Profile Summary ===\n";
-        settings.timer.display(std::cout);
+        std::cout << "Status: ";
+        switch (status) {
+            case cuopt::linear_programming::dual_simplex::lp_status_t::OPTIMAL:
+                std::cout << "OPTIMAL\n";
+                break;
+            case cuopt::linear_programming::dual_simplex::lp_status_t::INFEASIBLE:
+                std::cout << "INFEASIBLE\n";
+                break;
+            case cuopt::linear_programming::dual_simplex::lp_status_t::UNBOUNDED:
+                std::cout << "UNBOUNDED\n";
+                break;
+            case cuopt::linear_programming::dual_simplex::lp_status_t::TIME_LIMIT:
+                std::cout << "TIME_LIMIT\n";
+                break;
+            case cuopt::linear_programming::dual_simplex::lp_status_t::ITERATION_LIMIT:
+                std::cout << "ITERATION_LIMIT\n";
+                break;
+            case cuopt::linear_programming::dual_simplex::lp_status_t::NUMERICAL_ISSUES:
+                std::cout << "NUMERICAL_ISSUES\n";
+                break;
+            default:
+                std::cout << "OTHER\n";
+                break;
+        }
+
+        if (!std::isnan(solution.user_objective)) {
+            std::cout << "Objective (user): " << solution.user_objective << "\n";
+        }
+        std::cout << "Iterations: " << solution.iterations << "\n";
+
+        if (profile_enabled) {
+            std::cout << "=== Profile Summary ===\n";
+            settings.timer.display(std::cout);
+        }
     }
+    
     MPI_Finalize();
     
     return 0;

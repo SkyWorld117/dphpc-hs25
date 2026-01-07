@@ -26,6 +26,7 @@
 #include <dual_simplex/sparse_matrix.hpp>
 #include <dual_simplex/tic_toc.hpp>
 
+#include <mpi.h>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -2080,11 +2081,14 @@ void prepare_optimality(const lp_problem_t<i_t, f_t>& lp,
   }
   if (phase == 2) {
     if (!settings.inside_mip) {
-      settings.log.printf("\n");
+      int rank;
+      MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+      settings.log.printf("\n[%d]\n", rank);
       settings.log.printf(
         "Optimal solution found in %d iterations and %.2fs\n", iter, toc(start_time));
       settings.log.printf("Objective %+.8e\n", sol.user_objective);
-      settings.log.printf("\n");
+      settings.log.printf("\n[%d]\n", rank);
       settings.log.printf("Primal infeasibility (abs): %.2e\n", primal_infeas);
       settings.log.printf("Dual infeasibility (abs):   %.2e\n", dual_infeas);
       settings.log.printf("Perturbation:               %.2e\n", perturbation);
