@@ -2424,16 +2424,28 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
              // compatible with MPI_INT. If variable_status_t is 8-bit, use MPI_BYTE.
              MPI_Bcast(vstatus.data(), vstatus.size() * sizeof(variable_status_t), MPI_BYTE, winner_info.rank, MPI_COMM_WORLD);
              settings.log.printf("Using results from thread %d, after iteration %d \n", rank, iter);
-             // 2. CRITICAL: Reset Weights ("Cold Start" Fix)
+             
+             // 2. CRITICAL: Also sync the primal solution vector
+             // The basis (vstatus) changed, but sol.x must match! Otherwise we have an inconsistent state.
+             MPI_Bcast(sol.x.data(), sol.x.size() * sizeof(f_t), MPI_BYTE, winner_info.rank, MPI_COMM_WORLD);
+             // 3. Sync objective value to ensure consistency
+             MPI_Bcast(&sol.user_objective, 1, MPI_DOUBLE, winner_info.rank, MPI_COMM_WORLD);
+             
+             // 4. Reset Weights ("Cold Start" Fix)
              // Since we have a new basis but old weights, we MUST clear this 
              // to force dual_phase2_cu to re-calculate clean weights next time.
              delta_y_steepest_edge.clear();
              
-             // 3. Optional: Sync iteration count if you want logs to look consistent
+             // 5. Sync iteration count if you want logs to look consistent
              MPI_Bcast(&iter, 1, MPI_INT, winner_info.rank, MPI_COMM_WORLD);
         } else {
              // I am the winner. Broadcast my basis to the others.
              MPI_Bcast(vstatus.data(), vstatus.size() * sizeof(variable_status_t), MPI_BYTE, rank, MPI_COMM_WORLD);
+             
+             // Sync the primal solution vector
+             MPI_Bcast(sol.x.data(), sol.x.size() * sizeof(f_t), MPI_BYTE, rank, MPI_COMM_WORLD);
+             // Sync objective value
+             MPI_Bcast(&sol.user_objective, 1, MPI_DOUBLE, rank, MPI_COMM_WORLD);
              
              // I keep my 'delta_y_steepest_edge' because it matches my basis.
 
@@ -2445,6 +2457,10 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
         // (Assuming you have a way to check current time vs settings.time_limit)
         // if (toc(start_time) > settings.time_limit) return dual::status_t::TIME_LIMIT;
     }
+
+    // Ensure all ranks have exited the solver before proceeding
+    // TODO jujupieper IMPORTANT this shouldn't lead to much of a slowdown and should fix the segfault
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // free_workspace(workspace);
     return status;
