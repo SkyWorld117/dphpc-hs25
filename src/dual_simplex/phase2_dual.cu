@@ -2340,19 +2340,23 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
     // TODO jujupieper you don't need to copy this but like its fine ig
     simplex_solver_settings_t<i_t, f_t> local_settings = settings;
 
-    // Rank 0: Default Strategy
-    // Rank 1: Alternative Strategy (e.g., more aggressive steepest edge)
-    if (rank == 1) {
-        local_settings.steepest_edge_ratio = 0.9; 
-        // TODO jujupieper need to change this for dantzig with consistent perturbation or something similar
-        // local_settings.use_harris_ratio = !settings.use_harris_ratio; // Example divergence
-
-        // TODO jujupieper also put in different limits here for iterations
-    }
-
     // Define the "Sync Frequency" (How many pivots before we compare notes?)
     const i_t SYNC_INTERVAL = 1000; 
     const i_t global_iter_limit = settings.iteration_limit;
+
+    // Rank 0: Default Strategy
+    // Rank 1: Alternative Strategy (Dantzig / max-infeasibility pricing)
+    if (rank == 1) {
+        // Dantzig pricing in this codebase corresponds to selecting the leaving variable by
+        // maximum primal infeasibility (see phase2::phase2_pricing).
+        local_settings.use_steepest_edge_pricing = false;
+
+        // Assuming that max-infeasibility pricing will take less time 
+        SYNC_INTERVAL = 2000;
+
+        // Keep all other parameters identical unless you explicitly want divergence.
+        // local_settings.steepest_edge_ratio = settings.steepest_edge_ratio;
+    }
 
     dual::status_t status = dual::status_t::UNSET;
     bool global_optimal_found = false;
@@ -2387,8 +2391,8 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
              // Assuming sol.objective_value is populated. 
              // If not, calculate it: compute_perturbed_objective(lp.objective, sol.x);
              //  my_info.value = sol.objective_value; 
-            //  TODO jujupieper IMPORTANT check if this can be done quicker
-             cuopt::linear_programming::dual_simplex::phase2::compute_perturbed_objective(lp.objective, sol.x);
+              // TODO jujupieper IMPORTANT check if this can be done quicker
+              my_info.value = cuopt::linear_programming::dual_simplex::phase2::compute_perturbed_objective(lp.objective, sol.x);
              
         } else {
              my_info.value = std::numeric_limits<double>::infinity();
@@ -2419,7 +2423,7 @@ dual::status_t dual_phase2_cu_parallel_pivot(i_t phase, i_t slack_basis, f_t sta
              // Note: MPI needs raw pointers. Ensure vstatus is a vector of ints/enums 
              // compatible with MPI_INT. If variable_status_t is 8-bit, use MPI_BYTE.
              MPI_Bcast(vstatus.data(), vstatus.size(), MPI_INT, winner_info.rank, MPI_COMM_WORLD);
-
+             settings.log.printf("Using results from thread %d, after iteration %d \n", rank, iter);
              // 2. CRITICAL: Reset Weights ("Cold Start" Fix)
              // Since we have a new basis but old weights, we MUST clear this 
              // to force dual_phase2_cu to re-calculate clean weights next time.
