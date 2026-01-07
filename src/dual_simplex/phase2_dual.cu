@@ -512,68 +512,6 @@ void compute_inverse(cusparseHandle_t &cusparse_handle, cudssHandle_t &cudss_han
     // after inverse update later
 }
 
-template <typename i_t, typename f_t>
-__global__ void fetch_column_as_dense_kernel(i_t m, i_t col_idx, const i_t *__restrict__ B_col_ptr,
-                                             const i_t *__restrict__ B_row_ind,
-                                             const f_t *__restrict__ B_values,
-                                             f_t *__restrict__ col_dense) {
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    i_t start = B_col_ptr[col_idx];
-    i_t end = B_col_ptr[col_idx + 1];
-
-    if (idx >= end - start)
-        return;
-
-    i_t row = B_row_ind[start + idx];
-    f_t val = B_values[start + idx];
-    col_dense[row] = val;
-}
-
-template <typename i_t, typename f_t>
-void fetch_column_as_dense(i_t m, i_t col_idx, const i_t *d_B_col_ptr, const i_t *d_B_row_ind,
-                           const f_t *d_B_values, f_t *col_dense) {
-    // Initialize to zero
-    CUDA_CALL_AND_CHECK(cudaMemset(col_dense, 0, m * sizeof(f_t)), "cudaMemset col_dense");
-    int block_size = 32;
-    int grid_size = (m + block_size - 1) / block_size;
-    fetch_column_as_dense_kernel<<<grid_size, block_size>>>(m, col_idx, d_B_col_ptr, d_B_row_ind,
-                                                            d_B_values, col_dense);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "fetch_column_as_dense_kernel");
-}
-
-template <typename i_t, typename f_t>
-__global__ void fetch_row_as_dense_kernel(i_t m, i_t row_idx, const i_t *__restrict__ B_col_ptr,
-                                          const i_t *__restrict__ B_row_ind,
-                                          const f_t *__restrict__ B_values,
-                                          f_t *__restrict__ row_dense) {
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m)
-        return;
-
-    i_t start = B_col_ptr[idx];
-    i_t end = B_col_ptr[idx + 1];
-    for (i_t i = start; i < end; ++i) {
-        i_t row = B_row_ind[i];
-        if (row == row_idx) {
-            f_t val = B_values[i];
-            row_dense[idx] = val;
-            break;
-        }
-    }
-}
-
-template <typename i_t, typename f_t>
-void fetch_row_as_dense(i_t m, i_t row_idx, const i_t *d_B_col_ptr, const i_t *d_B_row_ind,
-                        const f_t *d_B_values, f_t *row_dense, cudaStream_t stream) {
-    // Initialize to zero
-    CUDA_CALL_AND_CHECK(cudaMemset(row_dense, 0, m * sizeof(f_t)), "cudaMemset row_dense");
-    int block_size = 32;
-    int grid_size = (m + block_size - 1) / block_size;
-    fetch_row_as_dense_kernel<<<grid_size, block_size, 0, stream>>>(
-        m, row_idx, d_B_col_ptr, d_B_row_ind, d_B_values, row_dense);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "fetch_row_as_dense_kernel");
-}
-
 template <typename i_t>
 __device__ i_t binary_search(i_t length, const i_t *__restrict__ arr, i_t target) {
     i_t left = 0;
@@ -612,96 +550,6 @@ __global__ void extract_sparse_row(i_t m, const i_t *__restrict__ d_B_pinv_col_p
             sparse_values[write_pos] = d_B_pinv_values[j] * alpha;
             break;
         }
-    }
-}
-
-template <typename i_t, typename f_t>
-__global__ void spmv_csc_kernel(i_t n, i_t m, const i_t *__restrict__ col_ptr,
-                                const i_t *__restrict__ row_ind, const f_t *__restrict__ values,
-                                const f_t *__restrict__ x, f_t *__restrict__ y, f_t alpha,
-                                f_t beta) {
-    // Compute y = alpha * A * x + beta * y where A is in CSC format
-    // Strategy: Each thread processes one column, performing scatter operation
-    // This is efficient when columns are relatively sparse and we have enough parallelism
-
-    i_t col_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (col_idx >= n)
-        return;
-
-    // Get the scaling factor for this column
-    f_t x_val = x[col_idx];
-    if (abs(x_val) < 1e-20)
-        return; // Skip zero columns to avoid unnecessary atomic operations
-
-    f_t scale = alpha * x_val;
-
-    // Iterate over non-zeros in this column and scatter to result
-    i_t col_start = col_ptr[col_idx];
-    i_t col_end = col_ptr[col_idx + 1];
-
-    for (i_t i = col_start; i < col_end; ++i) {
-        i_t row = row_ind[i];
-        f_t val = values[i];
-        // Use atomicAdd since multiple threads may write to the same output element
-        atomicAdd(&y[row], scale * val);
-    }
-}
-
-// Alternative version: Process columns in chunks to reduce atomics
-template <typename i_t, typename f_t>
-__global__ void
-spmv_csc_atomic_free_kernel(i_t n, i_t m, const i_t *__restrict__ col_ptr,
-                            const i_t *__restrict__ row_ind, const f_t *__restrict__ values,
-                            const f_t *__restrict__ x, f_t *__restrict__ y, f_t alpha, f_t beta) {
-    // Each warp processes one column cooperatively, writing to shared memory first
-    // to reduce atomic contention, then flushing to global memory
-
-    extern __shared__ f_t shared_mem[];
-
-    i_t warp_id = threadIdx.x / 32;
-    i_t lane_id = threadIdx.x % 32;
-    i_t col_idx = blockIdx.x * (blockDim.x / 32) + warp_id;
-
-    if (col_idx >= n)
-        return;
-
-    f_t x_val = x[col_idx];
-    if (abs(x_val) < 1e-20)
-        return;
-
-    f_t scale = alpha * x_val;
-    i_t col_start = col_ptr[col_idx];
-    i_t col_end = col_ptr[col_idx + 1];
-    i_t nnz_in_col = col_end - col_start;
-
-    // Process column elements in parallel within the warp
-    for (i_t i = col_start + lane_id; i < col_end; i += 32) {
-        i_t row = row_ind[i];
-        f_t val = values[i];
-        atomicAdd(&y[row], scale * val);
-    }
-}
-
-template <typename i_t, typename f_t>
-__global__ void mark_nnz_mask(i_t m, const f_t *__restrict__ values, i_t *__restrict__ flags,
-                              f_t threshold) {
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m)
-        return;
-    flags[idx] = (abs(values[idx]) > threshold) ? 1 : 0;
-}
-
-template <typename i_t, typename f_t>
-__global__ void scatter_compact(i_t m, const f_t *__restrict__ values,
-                                const i_t *__restrict__ flags, const i_t *__restrict__ prefix,
-                                i_t *__restrict__ nz_indices, f_t *__restrict__ nz_values) {
-    i_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m)
-        return;
-    if (flags[idx]) {
-        i_t pos = prefix[idx];
-        nz_indices[pos] = idx;
-        nz_values[pos] = values[idx];
     }
 }
 
@@ -1005,42 +853,6 @@ bool eta_update_inverse(i_t m, cusparseSpMatDescr_t &B_pinv_cusparse,
     }
 
     return true; // Successful update
-}
-
-template <typename i_t, typename f_t>
-__global__ void denseMatrixSparseVectorMulKernel(i_t m, const f_t *__restrict__ b_inv,
-                                                 const i_t *__restrict__ sparse_vec_indices,
-                                                 const f_t *__restrict__ sparse_vec_values,
-                                                 i_t nz_sparse_vec, f_t *__restrict__ result,
-                                                 bool transpose) {
-    id_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= m)
-        return;
-
-    f_t sum = 0.0;
-    for (i_t k = 0; k < nz_sparse_vec; ++k) {
-        i_t vec_idx = sparse_vec_indices[k];
-        f_t vec_val = sparse_vec_values[k];
-
-        i_t mat_idx;
-        if (transpose) {
-            // We want (B_inv^T)_{idx, vec_idx} =
-            // (B_inv)_{vec_idx, idx} B_inv is
-            // col-major, so element (row=vec_idx,
-            // col=idx) is at: col * m + row = idx
-            // * m + vec_idx
-            mat_idx = idx * m + vec_idx;
-        } else {
-            // We want (B_inv)_{idx, vec_idx}
-            // B_inv is col-major, so element
-            // (row=idx, col=vec_idx) is at: col *
-            // m + row = vec_idx * m + idx
-            mat_idx = vec_idx * m + idx;
-        }
-
-        sum += vec_val * b_inv[mat_idx];
-    }
-    result[idx] = sum;
 }
 
 template <typename i_t, typename f_t>
@@ -1755,9 +1567,7 @@ __global__ void compute_primal_variables_basiclist_kernel(i_t m, const i_t *d_ba
 }
 
 template <typename i_t, typename f_t>
-void compute_primal_variables(cusparseHandle_t &cusparse_handle, const i_t *d_B_pinv_col_ptr,
-                              const i_t *d_B_pinv_row_ind, const f_t *d_B_pinv_values,
-                              const i_t nz_B_pinv, const f_t *lp_rhs, const i_t *d_A_col_ptr,
+void compute_primal_variables(csc_cu_matrix<i_t, f_t> mat_B_pinv, const f_t *lp_rhs, const i_t *d_A_col_ptr,
                               const i_t *d_A_row_ind, const f_t *d_A_values,
                               const i_t *d_basic_list, const i_t *d_nonbasic_list, f_t tight_tol,
                               f_t *&d_x, const i_t m, const i_t n) {
@@ -1779,9 +1589,7 @@ void compute_primal_variables(cusparseHandle_t &cusparse_handle, const i_t *d_B_
     f_t *d_xB;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_xB, m * sizeof(f_t)), "cudaMalloc d_xB");
     //   ft.b_solve(rhs, xB);
-    phase2_cu::sparse_pinv_solve_gpu_dense_rhs<i_t, f_t>(cusparse_handle, m, d_B_pinv_col_ptr,
-                                                         d_B_pinv_row_ind, d_B_pinv_values,
-                                                         nz_B_pinv, d_rhs, d_xB, false);
+    mat_B_pinv.spmv_dense(d_rhs, d_xB);
 
     int grid_size_basic = (m + block_size - 1) / block_size;
     compute_primal_variables_basiclist_kernel<<<grid_size_basic, block_size>>>(m, d_basic_list,
@@ -1838,9 +1646,8 @@ void update_dual_variables(const i_t *d_delta_y_indices, const f_t *d_delta_y_va
 template <typename i_t, typename f_t>
 i_t compute_primal_solution_from_basis(const lp_problem_t<i_t, f_t> &lp, f_t *d_lp_rhs,
                                        const i_t *d_A_col_ptr, const i_t *d_A_row_ind,
-                                       const f_t *d_A_values, cusparseHandle_t &cusparse_handle,
-                                       i_t *d_B_pinv_col_ptr, i_t *d_B_pinv_row_ind,
-                                       f_t *d_B_pinv_values, i_t nz_B_pinv, const i_t *d_basic_list,
+                                       const f_t *d_A_values, csc_cu_matrix<i_t, f_t> mat_B_pinv,
+                                       const i_t *d_basic_list,
                                        const i_t *d_nonbasic_list,
                                        const std::vector<variable_status_t> &vstatus,
                                        std::vector<f_t> &x, f_t *d_x, const i_t m, const i_t n) {
@@ -1884,9 +1691,10 @@ i_t compute_primal_solution_from_basis(const lp_problem_t<i_t, f_t> &lp, f_t *d_
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_xB, m * sizeof(f_t)), "cudaMalloc d_xB");
 
     //   ft.b_solve(rhs, xB);
-    phase2_cu::sparse_pinv_solve_gpu_dense_rhs(cusparse_handle, m, d_B_pinv_col_ptr,
-                                               d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv,
-                                               d_lp_rhs, d_xB, false);
+    // phase2_cu::sparse_pinv_solve_gpu_dense_rhs(cusparse_handle, m, d_B_pinv_col_ptr,
+    //                                            d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv,
+    //                                            d_lp_rhs, d_xB, false);
+    mat_B_pinv.spmv_dense(d_lp_rhs, d_xB);
 
     grid_size = (m + block_size - 1) / block_size;
     compute_primal_variables_basiclist_kernel<<<grid_size, block_size>>>(m, d_basic_list, d_xB,
@@ -1902,8 +1710,7 @@ i_t compute_primal_solution_from_basis(const lp_problem_t<i_t, f_t> &lp, f_t *d_
 template <typename i_t, typename f_t>
 void compute_dual_solution_from_basis(const f_t *d_lp_objective, const i_t *d_A_col_ptr,
                                       const i_t *d_A_row_ind, const f_t *d_A_values,
-                                      cusparseHandle_t &cusparse_handle, i_t *d_B_pinv_col_ptr,
-                                      i_t *d_B_pinv_row_ind, f_t *d_B_pinv_values, i_t nz_B_pinv,
+                                      csc_cu_matrix<i_t, f_t> mat_B_pinv,
                                       const i_t *d_basic_list, const i_t *d_nonbasic_list,
                                       f_t *&d_y, f_t *&d_z, i_t m, i_t n) {
     f_t *d_cB;
@@ -1915,9 +1722,11 @@ void compute_dual_solution_from_basis(const f_t *d_lp_objective, const i_t *d_A_
                                                               d_cB);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "construct_c_basic_kernel");
 
-    phase2_cu::sparse_pinv_solve_gpu_dense_rhs(cusparse_handle, m, d_B_pinv_col_ptr,
-                                               d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv, d_cB,
-                                               d_y, true);
+    // phase2_cu::sparse_pinv_solve_gpu_dense_rhs(cusparse_handle, m, d_B_pinv_col_ptr,
+    //                                            d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv, d_cB,
+    //                                            d_y, true);
+    mat_B_pinv.spmv_dense_transpose(d_cB, d_y);
+
 
     // We want A'y + z = c
     // A = [ B N ]
@@ -1950,9 +1759,7 @@ template <typename i_t, typename f_t>
 void prepare_optimality(const lp_problem_t<i_t, f_t> &lp,
                         const simplex_solver_settings_t<i_t, f_t> &settings,
                         const f_t *d_lp_objective, const i_t *d_A_col_ptr, const i_t *d_A_row_ind,
-                        const f_t *d_A_values, cusparseHandle_t &cusparse_handle,
-                        i_t *d_B_pinv_col_ptr, i_t *d_B_pinv_row_ind, f_t *d_B_pinv_values,
-                        i_t nz_B_pinv, const std::vector<f_t> &objective,
+                        const f_t *d_A_values, csc_cu_matrix<i_t, f_t> mat_B_pinv, const std::vector<f_t> &objective,
                         const std::vector<i_t> &basic_list, const i_t *d_basic_list,
                         const std::vector<i_t> &nonbasic_list, const i_t *d_nonbasic_list,
                         const std::vector<variable_status_t> &vstatus, int phase, f_t start_time,
@@ -1975,8 +1782,7 @@ void prepare_optimality(const lp_problem_t<i_t, f_t> &lp,
         CUDA_CALL_AND_CHECK(cudaMalloc(&d_unperturbed_z, n * sizeof(f_t)),
                             "cudaMalloc unperturbed_z");
         phase2_cu::compute_dual_solution_from_basis(
-            d_lp_objective, d_A_col_ptr, d_A_row_ind, d_A_values, cusparse_handle, d_B_pinv_col_ptr,
-            d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv, d_basic_list, d_nonbasic_list,
+            d_lp_objective, d_A_col_ptr, d_A_row_ind, d_A_values, mat_B_pinv, d_basic_list, d_nonbasic_list,
             d_unperturbed_y, d_unperturbed_z, m, n);
         CUDA_CALL_AND_CHECK(cudaMemcpy(unperturbed_y.data(), d_unperturbed_y, m * sizeof(f_t),
                                        cudaMemcpyDeviceToHost),
@@ -2306,9 +2112,10 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     f_t *d_y;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_y, m * sizeof(f_t)), "cudaMalloc d_y");
     // Solve B'*y = cB
-    phase2_cu::sparse_pinv_solve_gpu_dense_rhs(cusparse_handle, m, d_B_pinv_col_ptr,
-                                               d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv,
-                                               d_c_basic, d_y, true);
+    // phase2_cu::sparse_pinv_solve_gpu_dense_rhs(cusparse_handle, m, d_B_pinv_col_ptr,
+    //                                            d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv,
+    //                                            d_c_basic, d_y, true);
+    mat_B_pinv.spmv_dense_transpose(d_c_basic, d_y);
 
     if (toc(start_time) > settings.time_limit) {
         return dual::status_t::TIME_LIMIT;
@@ -2349,8 +2156,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDA_CALL_AND_CHECK(cudaMemcpy(d_x, x.data(), n * sizeof(f_t), cudaMemcpyHostToDevice),
                         "cudaMemcpy x to device");
 
-    phase2_cu::compute_primal_variables(cusparse_handle, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                        d_B_pinv_values, nz_B_pinv, d_lp_rhs, d_A_col_ptr,
+    phase2_cu::compute_primal_variables(mat_B_pinv, d_lp_rhs, d_A_col_ptr,
                                         d_A_row_ind, d_A_values, d_basic_list, d_nonbasic_list,
                                         settings.tight_tol, d_x, m, n);
 
@@ -2448,8 +2254,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         timers.pricing_time += timers.stop_timer();
         if (leaving_index == -1) {
             phase2_cu::prepare_optimality(lp, settings, d_objective, d_A_col_ptr, d_A_row_ind,
-                                          d_A_values, cusparse_handle, d_B_pinv_col_ptr,
-                                          d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv, objective,
+                                          d_A_values, mat_B_pinv, objective,
                                           basic_list, d_basic_list, nonbasic_list, d_nonbasic_list,
                                           vstatus, phase, start_time, max_val, iter, x, y, z, sol);
             status = dual::status_t::OPTIMAL;
@@ -2592,8 +2397,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                 CUDA_CALL_AND_CHECK(cudaMalloc(&d_unperturbed_z, n * sizeof(f_t)),
                                     "cudaMalloc unperturbed_z");
                 phase2_cu::compute_dual_solution_from_basis(
-                    d_objective, d_A_col_ptr, d_A_row_ind, d_A_values, cusparse_handle,
-                    d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv, d_basic_list,
+                    d_objective, d_A_col_ptr, d_A_row_ind, d_A_values, mat_B_pinv, d_basic_list,
                     d_nonbasic_list, d_unperturbed_y, d_unperturbed_z, m, n);
                 CUDA_CALL_AND_CHECK(cudaMemcpy(unperturbed_y.data(), d_unperturbed_y,
                                                m * sizeof(f_t), cudaMemcpyDeviceToHost),
@@ -2626,9 +2430,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                         std::vector<f_t> unperturbed_x(n);
 
                         phase2_cu::compute_primal_solution_from_basis(
-                            lp, d_lp_rhs, d_A_col_ptr, d_A_row_ind, d_A_values, cusparse_handle,
-                            d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv,
-                            d_basic_list, d_nonbasic_list, vstatus, unperturbed_x, d_unperturbed_x,
+                            lp, d_lp_rhs, d_A_col_ptr, d_A_row_ind, d_A_values, mat_B_pinv, d_basic_list, d_nonbasic_list, vstatus, unperturbed_x, d_unperturbed_x,
                             m, n);
                         x = unperturbed_x;
                         primal_infeasibility = phase2::compute_initial_primal_infeasibilities(
@@ -2647,8 +2449,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                             primal_infeasibility <= settings.primal_tol) {
                             phase2_cu::prepare_optimality(
                                 lp, settings, d_objective, d_A_col_ptr, d_A_row_ind, d_A_values,
-                                cusparse_handle, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                d_B_pinv_values, nz_B_pinv, lp.objective, basic_list, d_basic_list,
+                                mat_B_pinv, lp.objective, basic_list, d_basic_list,
                                 nonbasic_list, d_nonbasic_list, vstatus, phase, start_time, max_val,
                                 iter, x, y, z, sol);
                             status = dual::status_t::OPTIMAL;
@@ -2668,8 +2469,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                     } else {
                         std::vector<f_t> unperturbed_x(n);
                         phase2_cu::compute_primal_solution_from_basis(
-                            lp, d_lp_rhs, d_A_col_ptr, d_A_row_ind, d_A_values, cusparse_handle,
-                            d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, nz_B_pinv,
+                            lp, d_lp_rhs, d_A_col_ptr, d_A_row_ind, d_A_values, mat_B_pinv,
                             d_basic_list, d_nonbasic_list, vstatus, unperturbed_x, d_unperturbed_x,
                             m, n);
                         x = unperturbed_x;
@@ -2684,8 +2484,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
                             orig_dual_infeas <= settings.dual_tol) {
                             phase2_cu::prepare_optimality(
                                 lp, settings, d_objective, d_A_col_ptr, d_A_row_ind, d_A_values,
-                                cusparse_handle, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                d_B_pinv_values, nz_B_pinv, objective, basic_list, d_basic_list,
+                                mat_B_pinv, objective, basic_list, d_basic_list,
                                 nonbasic_list, d_nonbasic_list, vstatus, phase, start_time, max_val,
                                 iter, x, y, z, sol);
                             status = dual::status_t::OPTIMAL;

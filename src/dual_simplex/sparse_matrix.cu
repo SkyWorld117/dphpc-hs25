@@ -54,6 +54,59 @@ __global__ void spmv_csc_sparse_vec_kernel(i_t m, const i_t *d_col_ptrs,
     }
 }
 
+template <typename i_t, typename f_t>
+__global__ void spmv_csc_dense_vec_kernel(i_t m, i_t n, const i_t *d_col_ptrs,
+                                          const i_t *d_row_indices, const f_t *d_values,
+                                          const f_t *d_x, f_t *d_out) {
+    i_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= n) {
+        return;
+    }
+
+    const f_t xj = d_x[col];
+    if (xj == f_t(0)) {
+        return;
+    }
+
+    const i_t start = d_col_ptrs[col];
+    const i_t end = d_col_ptrs[col + 1];
+    for (i_t k = start; k < end; ++k) {
+        const i_t row = d_row_indices[k];
+        const f_t val = d_values[k];
+        atomicAdd(&d_out[row], xj * val);
+    }
+}
+
+template <typename i_t, typename f_t>
+__global__ void spmv_csc_dense_vec_transpose_kernel(i_t n, const i_t *d_col_ptrs,
+                                                    const i_t *d_row_indices, const f_t *d_values,
+                                                    const f_t *d_x, f_t *d_out) {
+    i_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= n) {
+        return;
+    }
+
+    const i_t start = d_col_ptrs[col];
+    const i_t end = d_col_ptrs[col + 1];
+    f_t accum = f_t(0);
+    for (i_t k = start; k < end; ++k) {
+        const i_t row = d_row_indices[k];
+        const f_t val = d_values[k];
+        accum += val * d_x[row];
+    }
+    if (accum != f_t(0)) {
+        atomicAdd(&d_out[col], accum);
+    }
+}
+
+template <typename i_t, typename f_t>
+__global__ void scatter_sparse_vec_kernel(i_t nz, const i_t *idx, const f_t *val, f_t *out) {
+    i_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < nz) {
+        out[idx[tid]] = val[tid];
+    }
+}
+
 
 
 // End: Kernels
@@ -191,6 +244,99 @@ void csc_cu_matrix<i_t, f_t>::spmv_sparse(const cu_vector<i_t, f_t> &vec, cu_vec
     result.nnz = nnz_out;
 
     CUDA_CALL_AND_CHECK(cudaFree(d_dense), "cudaFree d_dense");
+}
+
+template <typename i_t, typename f_t>
+void csc_cu_matrix<i_t, f_t>::spmv_sparse_transpose(const cu_vector<i_t, f_t> &vec, cu_vector<i_t, f_t> &result) const {
+    // Assumes square CSC (m rows, n cols) and 0-based indices
+    if (result.max_nz < n) {
+        printf("csc_cu_matrix::spmv_sparse_transpose: insufficient capacity (max_nz=%lld, need up to %lld)\n",
+               static_cast<long long>(result.max_nz), static_cast<long long>(n));
+        return;
+    }
+
+    // Handle empty input vector
+    if (vec.nnz == 0) {
+        result.m = n;
+        result.nnz = 0;
+        return;
+    }
+
+    // Build dense x from sparse input (length m)
+    f_t *d_x_dense = nullptr;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_x_dense, m * sizeof(f_t)), "cudaMalloc d_x_dense");
+    CUDA_CALL_AND_CHECK(cudaMemset(d_x_dense, 0, m * sizeof(f_t)), "cudaMemset d_x_dense");
+
+    const i_t block_scatter = 256;
+    const i_t grid_scatter = (vec.nnz + block_scatter - 1) / block_scatter;
+    if (grid_scatter > 0) {
+        scatter_sparse_vec_kernel<<<grid_scatter, block_scatter>>>(vec.nnz, vec.d_indices, vec.d_values, d_x_dense);
+        CUDA_CALL_AND_CHECK(cudaGetLastError(), "scatter_sparse_vec_kernel");
+    }
+
+    // Dense accumulation for y = A^T * x
+    f_t *d_dense = nullptr;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_dense, n * sizeof(f_t)), "cudaMalloc d_dense transpose");
+    CUDA_CALL_AND_CHECK(cudaMemset(d_dense, 0, n * sizeof(f_t)), "cudaMemset d_dense transpose");
+
+    const i_t block_size = 256;
+    const i_t grid_size = (n + block_size - 1) / block_size;
+    if (grid_size > 0) {
+        spmv_csc_dense_vec_transpose_kernel<<<grid_size, block_size>>>(n, d_col_ptrs, d_row_indices, d_values,
+                                                                      d_x_dense, d_dense);
+        CUDA_CALL_AND_CHECK(cudaGetLastError(), "spmv_csc_dense_vec_transpose_kernel");
+    }
+
+    // Compact dense result into sparse format
+    thrust::device_ptr<f_t> val_begin(d_dense);
+    thrust::device_ptr<i_t> out_idx_begin(result.d_indices);
+    thrust::device_ptr<f_t> out_val_begin(result.d_values);
+
+    auto counting_begin = thrust::make_counting_iterator<i_t>(0);
+    auto counting_end = counting_begin + n;
+
+    auto zip_in_begin = thrust::make_zip_iterator(thrust::make_tuple(counting_begin, val_begin));
+    auto zip_in_end = thrust::make_zip_iterator(thrust::make_tuple(counting_end, val_begin + n));
+    auto zip_out_begin = thrust::make_zip_iterator(thrust::make_tuple(out_idx_begin, out_val_begin));
+
+    auto zip_out_end = thrust::copy_if(
+        thrust::cuda::par, zip_in_begin, zip_in_end, zip_out_begin,
+        [] __device__(const thrust::tuple<i_t, f_t> &item) { return thrust::get<1>(item) != f_t(0); });
+
+    i_t nnz_out = static_cast<i_t>(zip_out_end - zip_out_begin);
+    result.m = n;
+    result.nnz = nnz_out;
+
+    CUDA_CALL_AND_CHECK(cudaFree(d_dense), "cudaFree d_dense transpose");
+    CUDA_CALL_AND_CHECK(cudaFree(d_x_dense), "cudaFree d_x_dense");
+}
+
+template <typename i_t, typename f_t>
+void csc_cu_matrix<i_t, f_t>::spmv_dense(const f_t *d_vec, f_t *d_result) const {
+    // Assumes CSC (m rows, n cols)
+    CUDA_CALL_AND_CHECK(cudaMemset(d_result, 0, m * sizeof(f_t)), "cudaMemset d_result");
+
+    const i_t block_size = 256;
+    const i_t grid_size = (n + block_size - 1) / block_size;
+    if (grid_size > 0) {
+        spmv_csc_dense_vec_kernel<<<grid_size, block_size>>>(m, n, d_col_ptrs, d_row_indices, d_values,
+                                                             d_vec, d_result);
+        CUDA_CALL_AND_CHECK(cudaGetLastError(), "spmv_csc_dense_vec_kernel");
+    }
+}
+
+template <typename i_t, typename f_t>
+void csc_cu_matrix<i_t, f_t>::spmv_dense_transpose(const f_t *d_vec, f_t *d_result) const {
+    // Assumes CSC (m rows, n cols)
+    CUDA_CALL_AND_CHECK(cudaMemset(d_result, 0, n * sizeof(f_t)), "cudaMemset d_result transpose");
+
+    const i_t block_size = 256;
+    const i_t grid_size = (n + block_size - 1) / block_size;
+    if (grid_size > 0) {
+        spmv_csc_dense_vec_transpose_kernel<<<grid_size, block_size>>>(n, d_col_ptrs, d_row_indices, d_values,
+                                                                      d_vec, d_result);
+        CUDA_CALL_AND_CHECK(cudaGetLastError(), "spmv_csc_dense_vec_transpose_kernel");
+    }
 }
 
 template class csc_cu_matrix<int, double>;
