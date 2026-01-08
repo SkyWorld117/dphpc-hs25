@@ -3,6 +3,7 @@
  * This replaces the previous multi-solver CLI and avoids any GPU/RMM initialization.
  */
 
+#include <limits>
 #include <mps_parser/parser.hpp>
 #include <math_optimization/solution_reader.hpp>
 #include <utilities/high_res_timer.hpp>
@@ -108,6 +109,8 @@ int main(int argc, char* argv[]) {
         .help("use HiGHS presolve instead of built-in presolve");
     program.add_argument("--gpu").default_value(false).implicit_value(true)
         .help("enable GPU acceleration");
+    program.add_argument("--max-iters").default_value(std::numeric_limits<int>::max()).scan<'i', int>()
+        .help("set maximum iteration limit");
 
     try {
         program.parse_args(argc, argv);
@@ -122,6 +125,7 @@ int main(int argc, char* argv[]) {
     const std::string initial_solution_file = program.get<std::string>("--initial-solution");
     const bool use_highs_presolve = program.get<bool>("--highs-presolve");
     const bool use_gpu = program.get<bool>("--gpu");
+    const int max_iters = program.get<int>("--max-iters");
 
     cuopt::linear_programming::dual_simplex::user_problem_t<int, double> user_problem;
     if (use_highs_presolve) {
@@ -157,6 +161,7 @@ int main(int argc, char* argv[]) {
     cuopt::linear_programming::dual_simplex::simplex_solver_settings_t<int, double> settings;
     settings.profile = profile_enabled;
     settings.gpu = use_gpu;
+    settings.iteration_limit = max_iters;
 
     cuopt::linear_programming::dual_simplex::lp_solution_t<int, double> solution(
         user_problem.num_rows, user_problem.num_cols);
