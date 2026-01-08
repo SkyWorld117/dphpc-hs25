@@ -33,6 +33,29 @@ __global__ void fetch_row_kernel(i_t row_idx, i_t n_cols, const i_t *d_col_ptrs,
 }
 
 template <typename i_t, typename f_t>
+__global__ void fetch_row_kernel(i_t row_idx, i_t n_cols, const i_t *d_col_ptrs,
+                                 const i_t *d_row_indices, const f_t *d_values, i_t *d_out_idx,
+                                 f_t *d_out_val, i_t *d_count, i_t max_out, const f_t alpha) {
+    i_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= n_cols) {
+        return;
+    }
+
+    const i_t start = d_col_ptrs[col];
+    const i_t end = d_col_ptrs[col + 1];
+    for (i_t k = start; k < end; ++k) {
+        if (d_row_indices[k] == row_idx) {
+            i_t pos = atomicAdd(d_count, 1);
+            if (pos < max_out) {
+                d_out_idx[pos] = col;      // column index becomes sparse index for the row
+                d_out_val[pos] = alpha * d_values[k];
+            }
+            return; // each column contributes at most one entry for this row
+        }
+    }
+}
+
+template <typename i_t, typename f_t>
 __global__ void spmv_csc_sparse_vec_kernel(i_t m, const i_t *d_col_ptrs,
                                            const i_t *d_row_indices, const f_t *d_values,
                                            const i_t *d_vec_indices, const f_t *d_vec_values,
@@ -167,6 +190,50 @@ void csc_cu_matrix<i_t, f_t>::fetch_row(i_t row_idx, cu_vector<i_t, f_t> &row) c
 
     fetch_row_kernel<<<grid_size, block_size>>>(row_idx, n, d_col_ptrs, d_row_indices, d_values,
                                                row.d_indices, row.d_values, d_nnz, row.max_nz);
+    CUDA_CALL_AND_CHECK(cudaGetLastError(), "fetch_row_kernel");
+
+    // Copy nnz back
+    i_t h_nnz = 0;
+    CUDA_CALL_AND_CHECK(cudaMemcpy(&h_nnz, d_nnz, sizeof(i_t), cudaMemcpyDeviceToHost),
+                       "cudaMemcpy d_nnz to host");
+    CUDA_CALL_AND_CHECK(cudaFree(d_nnz), "cudaFree d_nnz");
+
+    if (h_nnz > row.max_nz) {
+        printf(
+            "csc_cu_matrix::fetch_row: truncated result (capacity %lld, needed %lld)\n",
+            static_cast<long long>(row.max_nz), static_cast<long long>(h_nnz));
+        h_nnz = row.max_nz;
+    }
+
+    row.m = n;
+    row.nnz = h_nnz;
+
+    // Sort by column index to keep sparsity ordered
+    if (h_nnz > 1) {
+        thrust::device_ptr<i_t> idx_begin(row.d_indices);
+        thrust::device_ptr<f_t> val_begin(row.d_values);
+        thrust::sort_by_key(idx_begin, idx_begin + h_nnz, val_begin);
+    }
+}
+
+template <typename i_t, typename f_t>
+void csc_cu_matrix<i_t, f_t>::fetch_row(i_t row_idx, cu_vector<i_t, f_t> &row, const f_t alpha) const {
+    if (row_idx < 0 || row_idx >= m) {
+        printf("csc_cu_matrix::fetch_row: row index out of bounds (%lld)\n",
+               static_cast<long long>(row_idx));
+        return;
+    }
+
+    // Clear output count on device
+    i_t *d_nnz = nullptr;
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_nnz, sizeof(i_t)), "cudaMalloc d_nnz");
+    CUDA_CALL_AND_CHECK(cudaMemset(d_nnz, 0, sizeof(i_t)), "cudaMemset d_nnz");
+
+    const i_t block_size = 128;
+    const i_t grid_size = (n + block_size - 1) / block_size; // n columns to scan
+
+    fetch_row_kernel<<<grid_size, block_size>>>(row_idx, n, d_col_ptrs, d_row_indices, d_values,
+                                               row.d_indices, row.d_values, d_nnz, row.max_nz, alpha);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "fetch_row_kernel");
 
     // Copy nnz back

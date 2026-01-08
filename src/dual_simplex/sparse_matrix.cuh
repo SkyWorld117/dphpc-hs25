@@ -21,6 +21,7 @@ class csc_cu_matrix {
 
     void fetch_column(i_t col_idx, cu_vector<i_t, f_t>& column) const;
     void fetch_row(i_t row_idx, cu_vector<i_t, f_t>& row) const;
+    void fetch_row(i_t row_idx, cu_vector<i_t, f_t>& row, const f_t alpha) const;
     void spmv_sparse(const cu_vector<i_t, f_t>& vec, cu_vector<i_t, f_t>& result) const;
     void spmv_sparse_transpose(const cu_vector<i_t, f_t>& vec, cu_vector<i_t, f_t>& result) const;
     void spmv_dense(const f_t* d_vec, f_t* d_result) const;

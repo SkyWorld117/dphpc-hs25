@@ -1182,43 +1182,51 @@ __global__ void get_row_nnz(i_t m, const i_t *__restrict__ d_B_pinv_col_ptr,
 }
 
 template <typename i_t, typename f_t>
-void compute_delta_y(cusparseHandle_t &cusparse_handle, const i_t *d_B_pinv_col_ptr,
-                     const i_t *d_B_pinv_row_ind, const f_t *d_B_pinv_values, i_t nz_B_pinv,
-                     i_t basic_leaving_index, i_t direction, i_t *&d_delta_y_sparse_indices,
+void compute_delta_y(csc_cu_matrix<i_t, f_t> &mat_B_pinv, i_t basic_leaving_index, i_t direction, i_t *&d_delta_y_sparse_indices,
                      f_t *&d_delta_y_sparse_values, i_t &nz_delta_y_sparse, i_t m) {
-    i_t *d_nnz;
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_nnz, sizeof(i_t)), "cudaMalloc d_nnz");
-    CUDA_CALL_AND_CHECK(cudaMemset(d_nnz, 0, sizeof(i_t)), "cudaMemset d_nnz");
 
-    int block_size = 256;
-    int grid_size = (m + block_size - 1) / block_size;
-
-    // Use existing kernel to count NNZ in the row
-    phase2_cu::get_row_nnz<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                                      basic_leaving_index, d_nnz);
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "get_row_nnz kernel for delta_y");
-    CUDA_CALL_AND_CHECK(cudaMemcpy(&nz_delta_y_sparse, d_nnz, sizeof(i_t), cudaMemcpyDeviceToHost),
-                        "cudaMemcpy nnz");
-
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_delta_y_sparse_indices, nz_delta_y_sparse * sizeof(i_t)),
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_delta_y_sparse_indices, m * sizeof(i_t)),
                         "cudaMalloc d_delta_y_sparse_indices");
-    CUDA_CALL_AND_CHECK(cudaMalloc(&d_delta_y_sparse_values, nz_delta_y_sparse * sizeof(f_t)),
+    CUDA_CALL_AND_CHECK(cudaMalloc(&d_delta_y_sparse_values, m * sizeof(f_t)),
                         "cudaMalloc d_delta_y_sparse_values");
+    cu_vector<i_t, f_t> vec_delta_y_sparse(m, 0, m, d_delta_y_sparse_indices, d_delta_y_sparse_values);
 
-    // Reset counter for writing
-    CUDA_CALL_AND_CHECK(cudaMemset(d_nnz, 0, sizeof(i_t)), "cudaMemset d_nnz");
-    // 3. Extract the row using existing kernel
-    phase2_cu::extract_sparse_row<<<grid_size, block_size>>>(
-        m, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, (f_t) -direction,
-        basic_leaving_index, d_delta_y_sparse_indices, d_delta_y_sparse_values, d_nnz);
+    mat_B_pinv.fetch_row(basic_leaving_index, vec_delta_y_sparse, (f_t) -direction);
+    nz_delta_y_sparse = vec_delta_y_sparse.nnz;
 
-    CUDA_CALL_AND_CHECK(cudaMemcpy(&nz_delta_y_sparse, d_nnz, sizeof(i_t), cudaMemcpyDeviceToHost),
-                        "cudaMemcpy nnz");
+    // i_t *d_nnz;
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&d_nnz, sizeof(i_t)), "cudaMalloc d_nnz");
+    // CUDA_CALL_AND_CHECK(cudaMemset(d_nnz, 0, sizeof(i_t)), "cudaMemset d_nnz");
 
-    CUDA_CALL_AND_CHECK(cudaGetLastError(), "extract_sparse_row kernel for delta_y");
+    // int block_size = 256;
+    // int grid_size = (m + block_size - 1) / block_size;
 
-    // Free temporary memory
-    CUDA_CALL_AND_CHECK(cudaFree(d_nnz), "cudaFree d_nnz");
+    // // Use existing kernel to count NNZ in the row
+    // phase2_cu::get_row_nnz<<<grid_size, block_size>>>(m, d_B_pinv_col_ptr, d_B_pinv_row_ind,
+    //                                                   basic_leaving_index, d_nnz);
+    // CUDA_CALL_AND_CHECK(cudaGetLastError(), "get_row_nnz kernel for delta_y");
+    // CUDA_CALL_AND_CHECK(cudaMemcpy(&nz_delta_y_sparse, d_nnz, sizeof(i_t), cudaMemcpyDeviceToHost),
+    //                     "cudaMemcpy nnz");
+
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&d_delta_y_sparse_indices, nz_delta_y_sparse * sizeof(i_t)),
+    //                     "cudaMalloc d_delta_y_sparse_indices");
+    // CUDA_CALL_AND_CHECK(cudaMalloc(&d_delta_y_sparse_values, nz_delta_y_sparse * sizeof(f_t)),
+    //                     "cudaMalloc d_delta_y_sparse_values");
+
+    // // Reset counter for writing
+    // CUDA_CALL_AND_CHECK(cudaMemset(d_nnz, 0, sizeof(i_t)), "cudaMemset d_nnz");
+    // // 3. Extract the row using existing kernel
+    // phase2_cu::extract_sparse_row<<<grid_size, block_size>>>(
+    //     m, d_B_pinv_col_ptr, d_B_pinv_row_ind, d_B_pinv_values, (f_t) -direction,
+    //     basic_leaving_index, d_delta_y_sparse_indices, d_delta_y_sparse_values, d_nnz);
+
+    // CUDA_CALL_AND_CHECK(cudaMemcpy(&nz_delta_y_sparse, d_nnz, sizeof(i_t), cudaMemcpyDeviceToHost),
+    //                     "cudaMemcpy nnz");
+
+    // CUDA_CALL_AND_CHECK(cudaGetLastError(), "extract_sparse_row kernel for delta_y");
+
+    // // Free temporary memory
+    // CUDA_CALL_AND_CHECK(cudaFree(d_nnz), "cudaFree d_nnz");
 }
 
 template <typename i_t, typename f_t>
@@ -1916,6 +1924,9 @@ __global__ void sparse_vector_squared_norm_kernel(i_t nz, const i_t *d_indices, 
 
 template <typename i_t, typename f_t>
 f_t sparse_vector_squared_norm_gpu(i_t nz, const i_t *d_indices, const f_t *d_values) {
+    if (nz == 0) {
+        return 0.0;
+    }
     const i_t block_size = 256;
     i_t grid_size = (nz + block_size - 1) / block_size;
     f_t *d_partial_sums;
@@ -2266,8 +2277,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         f_t *d_delta_z_sparse_values;
         i_t nz_delta_z_sparse = 0;
 
-        phase2_cu::compute_delta_y(cusparse_handle, d_B_pinv_col_ptr, d_B_pinv_row_ind,
-                                   d_B_pinv_values, nz_B_pinv, basic_leaving_index, direction,
+        phase2_cu::compute_delta_y(mat_B_pinv, basic_leaving_index, direction,
                                    d_delta_y_sparse_indices, d_delta_y_sparse_values,
                                    nz_delta_y_sparse, m);
         timers.btran_time += timers.stop_timer();
