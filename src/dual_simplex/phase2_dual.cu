@@ -753,6 +753,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
         timers.start_timer();
         i_t delta_y_nz0 = 0;
         const i_t nz_delta_y = delta_y_sparse.i.size();
+        #pragma omp parallel for reduction(+ : delta_y_nz0)
         for (i_t k = 0; k < nz_delta_y; k++) {
             if (std::abs(delta_y_sparse.x[k]) > 1e-12) {
                 delta_y_nz0++;

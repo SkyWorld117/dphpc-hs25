@@ -108,6 +108,7 @@ void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const sparse_vecto
     // Copy sparse rhs to dense d_rhs
     std::vector<f_t> h_rhs_dense(m, 0.0);
     const i_t nz_rhs = rhs.i.size();
+    #pragma omp parallel for
     for (i_t k = 0; k < nz_rhs; ++k) {
         h_rhs_dense[rhs.i[k]] = rhs.x[k];
     }
@@ -136,188 +137,6 @@ void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const sparse_vecto
     }
 }
 
-// Computes vectors farkas_y, farkas_zl, farkas_zu that satisfy
-//
-// A'*farkas_y + farkas_zl - farkas_zu ~= 0
-// farkas_zl, farkas_zu >= 0,
-// b'*farkas_y + l'*farkas_zl - u'*farkas_zu = farkas_constant > 0
-//
-// This is a Farkas certificate for the infeasibility of the primal problem
-//
-// A*x = b, l <= x <= u
-template <typename i_t, typename f_t>
-void compute_farkas_certificate(const lp_problem_t<i_t, f_t>& lp,
-                                const simplex_solver_settings_t<i_t, f_t>& settings,
-                                const std::vector<variable_status_t>& vstatus,
-                                const std::vector<f_t>& x, const std::vector<f_t>& y,
-                                const std::vector<f_t>& z, const std::vector<f_t>& delta_y,
-                                const std::vector<f_t>& delta_z, i_t direction, i_t leaving_index,
-                                f_t obj_val, std::vector<f_t>& farkas_y,
-                                std::vector<f_t>& farkas_zl, std::vector<f_t>& farkas_zu,
-                                f_t& farkas_constant) {
-    const i_t m = lp.num_rows;
-    const i_t n = lp.num_cols;
-
-    std::vector<f_t> original_residual = z;
-    matrix_transpose_vector_multiply(lp.A, 1.0, y, 1.0, original_residual);
-    for (i_t j = 0; j < n; ++j) {
-        original_residual[j] -= lp.objective[j];
-    }
-    const f_t original_residual_norm = vector_norm2<i_t, f_t>(original_residual);
-    settings.log.printf("|| A'*y + z - c || = %e\n", original_residual_norm);
-
-    std::vector<f_t> zl(n);
-    std::vector<f_t> zu(n);
-    for (i_t j = 0; j < n; ++j) {
-        zl[j] = std::max(0.0, z[j]);
-        zu[j] = -std::min(0.0, z[j]);
-    }
-
-    original_residual = zl;
-    matrix_transpose_vector_multiply(lp.A, 1.0, y, 1.0, original_residual);
-    for (i_t j = 0; j < n; ++j) {
-        original_residual[j] -= (zu[j] + lp.objective[j]);
-    }
-    const f_t original_residual_2 = vector_norm2<i_t, f_t>(original_residual);
-    settings.log.printf("|| A'*y + zl - zu - c || = %e\n", original_residual_2);
-
-    std::vector<f_t> search_dir_residual = delta_z;
-    matrix_transpose_vector_multiply(lp.A, 1.0, delta_y, 1.0, search_dir_residual);
-    settings.log.printf("|| A'*delta_y + delta_z || = %e\n",
-                        vector_norm2<i_t, f_t>(search_dir_residual));
-
-    std::vector<f_t> y_bar(m);
-    for (i_t i = 0; i < m; ++i) {
-        y_bar[i] = y[i] + delta_y[i];
-    }
-    original_residual = z;
-    matrix_transpose_vector_multiply(lp.A, 1.0, y_bar, 1.0, original_residual);
-    for (i_t j = 0; j < n; ++j) {
-        original_residual[j] += (delta_z[j] - lp.objective[j]);
-    }
-    const f_t original_residual_3 = vector_norm2<i_t, f_t>(original_residual);
-    settings.log.printf("|| A'*(y + delta_y) + (z + delta_z) - c || = %e\n", original_residual_3);
-
-    farkas_y.resize(m);
-    farkas_zl.resize(n);
-    farkas_zu.resize(n);
-
-    f_t gamma = 0.0;
-    for (i_t j = 0; j < n; ++j) {
-        const f_t cj = lp.objective[j];
-        const f_t lower = lp.lower[j];
-        const f_t upper = lp.upper[j];
-        if (lower > -inf) {
-            gamma -= lower * std::min(0.0, cj);
-        }
-        if (upper < inf) {
-            gamma -= upper * std::max(0.0, cj);
-        }
-    }
-    printf("gamma = %e\n", gamma);
-
-    const f_t threshold = 1.0;
-    const f_t positive_threshold = std::max(-gamma, 0.0) + threshold;
-    printf("positive_threshold = %e\n", positive_threshold);
-
-    // We need to increase the dual objective to positive threshold
-    f_t alpha = threshold;
-    const f_t infeas = (direction == 1) ? (lp.lower[leaving_index] - x[leaving_index])
-                                        : (x[leaving_index] - lp.upper[leaving_index]);
-    // We need the new objective to be at least positive_threshold
-    // positive_threshold = obj_val+ alpha * infeas
-    // infeas > 0, alpha > 0, positive_threshold > 0
-    printf("direction = %d\n", direction);
-    printf("lower %e x %e upper %d\n", lp.lower[leaving_index], x[leaving_index],
-           lp.upper[leaving_index]);
-    printf("infeas = %e\n", infeas);
-    printf("obj_val = %e\n", obj_val);
-    alpha = std::max(threshold, (positive_threshold - obj_val) / infeas);
-    printf("alpha = %e\n", alpha);
-
-    std::vector<f_t> y_prime(m);
-    std::vector<f_t> zl_prime(n);
-    std::vector<f_t> zu_prime(n);
-
-    // farkas_y = y + alpha * delta_y
-    for (i_t i = 0; i < m; ++i) {
-        farkas_y[i] = y[i] + alpha * delta_y[i];
-        y_prime[i] = y[i] + alpha * delta_y[i];
-    }
-    // farkas_zl = z + alpha * delta_z  - c-
-    for (i_t j = 0; j < n; ++j) {
-        const f_t cj = lp.objective[j];
-        const f_t z_j = z[j];
-        const f_t delta_z_j = delta_z[j];
-        farkas_zl[j] = std::max(0.0, z_j) + alpha * std::max(0.0, delta_z_j) + -std::min(0.0, cj);
-        zl_prime[j] = zl[j] + alpha * std::max(0.0, delta_z_j);
-    }
-
-    // farkas_zu = z + alpha * delta_z + c+
-    for (i_t j = 0; j < n; ++j) {
-        const f_t cj = lp.objective[j];
-        const f_t z_j = z[j];
-        const f_t delta_z_j = delta_z[j];
-        farkas_zu[j] = -std::min(0.0, z_j) - alpha * std::min(0.0, delta_z_j) + std::max(0.0, cj);
-        zu_prime[j] = zu[j] + alpha * (-std::min(0.0, delta_z_j));
-    }
-
-    // farkas_constant = b'*farkas_y + l'*farkas_zl - u'*farkas_zu
-    farkas_constant = 0.0;
-    f_t test_constant = 0.0;
-    f_t test_3 = 0.0;
-    for (i_t i = 0; i < m; ++i) {
-        farkas_constant += lp.rhs[i] * farkas_y[i];
-        test_constant += lp.rhs[i] * y_prime[i];
-        test_3 += lp.rhs[i] * delta_y[i];
-    }
-    printf("b'*delta_y = %e\n", test_3);
-    printf("|| b || %e\n", vector_norm_inf<i_t, f_t>(lp.rhs));
-    printf("|| delta y || %e\n", vector_norm_inf<i_t, f_t>(delta_y));
-    for (i_t j = 0; j < n; ++j) {
-        const f_t lower = lp.lower[j];
-        const f_t upper = lp.upper[j];
-        if (lower > -inf) {
-            farkas_constant += lower * farkas_zl[j];
-            test_constant += lower * zl_prime[j];
-            const f_t delta_z_l_j = std::max(delta_z[j], 0.0);
-            test_3 += lower * delta_z_l_j;
-        }
-        if (upper < inf) {
-            farkas_constant -= upper * farkas_zu[j];
-            test_constant -= upper * zu_prime[j];
-            const f_t delta_z_u_j = -std::min(delta_z[j], 0.0);
-            test_3 -= upper * delta_z_u_j;
-        }
-    }
-
-    // Verify that the Farkas certificate is valid
-    std::vector<f_t> residual = farkas_zl;
-    matrix_transpose_vector_multiply(lp.A, 1.0, farkas_y, 1.0, residual);
-    for (i_t j = 0; j < n; ++j) {
-        residual[j] -= farkas_zu[j];
-    }
-    const f_t residual_norm = vector_norm2<i_t, f_t>(residual);
-
-    f_t zl_min = 0.0;
-    for (i_t j = 0; j < n; ++j) {
-        zl_min = std::min(zl_min, farkas_zl[j]);
-    }
-    settings.log.printf("farkas_zl_min = %e\n", zl_min);
-    f_t zu_min = 0.0;
-    for (i_t j = 0; j < n; ++j) {
-        zu_min = std::min(zu_min, farkas_zu[j]);
-    }
-    settings.log.printf("farkas_zu_min = %e\n", zu_min);
-
-    settings.log.printf("|| A'*farkas_y + farkas_zl - farkas_zu || = %e\n", residual_norm);
-    settings.log.printf("b'*farkas_y + l'*farkas_zl - u'*farkas_zu = %e\n", farkas_constant);
-
-    if (residual_norm < 1e-6 && farkas_constant > 0.0 && zl_min >= 0.0 && zu_min >= 0.0) {
-        settings.log.printf("Farkas certificate of infeasibility constructed\n");
-    }
-}
-
 template <typename i_t, typename f_t>
 void initial_perturbation(const lp_problem_t<i_t, f_t>& lp,
                           const simplex_solver_settings_t<i_t, f_t>& settings,
@@ -339,6 +158,7 @@ void initial_perturbation(const lp_problem_t<i_t, f_t>& lp,
     i_t num_perturb = 0;
 
     random_t<i_t, f_t> random(settings.random_seed);
+    #pragma omp parallel for reduction(+ : sum_perturb, num_perturb)
     for (i_t j = 0; j < n; ++j) {
         f_t obj = objective[j] = lp.objective[j];
 
@@ -382,6 +202,7 @@ void compute_reduced_cost_update(const lp_problem_t<i_t, f_t>& lp,
     const i_t n = lp.num_cols;
 
     // delta_zB = sigma*ei
+    #pragma omp parallel for
     for (i_t k = 0; k < m; k++) {
         const i_t j = basic_list[k];
         delta_z[j] = 0;
@@ -480,6 +301,7 @@ void compute_reduced_costs(const std::vector<f_t>& objective, const csc_matrix_t
         z[j] -= dot;
     }
     // zB = 0
+    #pragma omp parallel for
     for (i_t k = 0; k < m; ++k) {
         z[basic_list[k]] = 0.0;
     }
@@ -512,6 +334,7 @@ void compute_primal_variables(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
     //   ft.b_solve(rhs, xB);
     phase2::pinv_solve<i_t, f_t>(cublas_handle, d_B_pinv, rhs, xB, m, false);
 
+    #pragma omp parallel for
     for (i_t k = 0; k < m; ++k) {
         const i_t j = basic_list[k];
         x[j] = xB[k];
@@ -521,6 +344,7 @@ void compute_primal_variables(cublasHandle_t& cublas_handle, f_t* d_B_pinv,
 template <typename i_t, typename f_t>
 void clear_delta_z(i_t entering_index, i_t leaving_index, std::vector<i_t>& delta_z_mark,
                    std::vector<i_t>& delta_z_indices, std::vector<f_t>& delta_z) {
+    #pragma omp parallel for
     for (i_t k = 0; k < (i_t) (delta_z_indices.size()); k++) {
         const i_t j = delta_z_indices[k];
         delta_z[j] = 0.0;
@@ -537,6 +361,7 @@ template <typename i_t, typename f_t>
 void clear_delta_x(const std::vector<i_t>& basic_list, i_t entering_index,
                    sparse_vector_t<i_t, f_t>& scaled_delta_xB_sparse, std::vector<f_t>& delta_x) {
     const i_t scaled_delta_xB_nz = scaled_delta_xB_sparse.i.size();
+    #pragma omp parallel for
     for (i_t k = 0; k < scaled_delta_xB_nz; ++k) {
         const i_t j = basic_list[scaled_delta_xB_sparse.i[k]];
         delta_x[j] = 0.0;
@@ -554,6 +379,7 @@ void compute_dual_residual(const csc_matrix_t<i_t, f_t>& A, const std::vector<f_
     dual_residual = z;
     const i_t n = A.n;
     // r = A'*y + z  - c
+    #pragma omp parallel for
     for (i_t j = 0; j < n; ++j) {
         dual_residual[j] -= objective[j];
     }
@@ -704,6 +530,7 @@ f_t compute_initial_primal_infeasibilities(const lp_problem_t<i_t, f_t>& lp,
     infeasibility_indices.reserve(n);
     infeasibility_indices.clear();
     f_t primal_inf = 0.0;
+    #pragma omp parallel for reduction(+ : primal_inf)
     for (i_t k = 0; k < m; ++k) {
         const i_t j = basic_list[k];
         const f_t lower_infeas = lp.lower[j] - x[j];
@@ -1106,11 +933,13 @@ void initialize_steepest_edge_norms_from_slack_basis(const std::vector<i_t>& bas
                                                      std::vector<f_t>& delta_y_steepest_edge) {
     const i_t m = basic_list.size();
     const i_t n = delta_y_steepest_edge.size();
+    #pragma omp parallel for
     for (i_t k = 0; k < m; ++k) {
         const i_t j = basic_list[k];
         delta_y_steepest_edge[j] = 1.0;
     }
     const i_t n_minus_m = n - m;
+    #pragma omp parallel for
     for (i_t k = 0; k < n_minus_m; ++k) {
         const i_t j = nonbasic_list[k];
         delta_y_steepest_edge[j] = 1e-4;
@@ -1423,18 +1252,22 @@ void reset_basis_mark(const std::vector<i_t>& basic_list, const std::vector<i_t>
     const i_t n = nonbasic_mark.size();
     const i_t n_minus_m = n - m;
 
+    #pragma omp parallel for
     for (i_t k = 0; k < n; k++) {
         basic_mark[k] = -1;
     }
 
+    #pragma omp parallel for
     for (i_t k = 0; k < n; k++) {
         nonbasic_mark[k] = -1;
     }
 
+    #pragma omp parallel for
     for (i_t k = 0; k < n_minus_m; k++) {
         nonbasic_mark[nonbasic_list[k]] = k;
     }
 
+    #pragma omp parallel for
     for (i_t k = 0; k < m; k++) {
         basic_mark[basic_list[k]] = k;
     }
@@ -1483,12 +1316,14 @@ void update_dual_variables(const sparse_vector_t<i_t, f_t>& delta_y_sparse,
     // Update dual variables
     // y <- y + steplength * delta_y
     const i_t delta_y_nz = delta_y_sparse.i.size();
+    #pragma omp parallel for
     for (i_t k = 0; k < delta_y_nz; ++k) {
         const i_t i = delta_y_sparse.i[k];
         y[i] += step_length * delta_y_sparse.x[k];
     }
     // z <- z + steplength * delta_z
     const i_t delta_z_nz = delta_z_indices.size();
+    #pragma omp parallel for
     for (i_t k = 0; k < delta_z_nz; ++k) {
         const i_t j = delta_z_indices[k];
         z[j] += step_length * delta_z[j];
@@ -1698,6 +1533,7 @@ f_t primal_infeasibility(const lp_problem_t<i_t, f_t>& lp,
                          const std::vector<variable_status_t>& vstatus, const std::vector<f_t>& x) {
     const i_t n = lp.num_cols;
     f_t primal_inf = 0;
+    #pragma omp parallel for reduction(+ : primal_inf)
     for (i_t j = 0; j < n; ++j) {
         if (x[j] < lp.lower[j]) {
             // x_j < l_j => -x_j > -l_j => -x_j + l_j > 0
@@ -1925,6 +1761,7 @@ template <typename f_t>
 f_t compute_perturbed_objective(const std::vector<f_t>& objective, const std::vector<f_t>& x) {
     const size_t n = objective.size();
     f_t obj_val = 0.0;
+    #pragma omp parallel for reduction(+ : obj_val)
     for (size_t j = 0; j < n; ++j) {
         obj_val += objective[j] * x[j];
     }
