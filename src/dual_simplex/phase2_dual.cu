@@ -957,7 +957,7 @@ void sparse_pinv_solve_gpu_sparse_rhs(cusparseHandle_t &cusparse_handle, i_t m,
 }
 
 template <typename i_t, typename f_t>
-void sparse_pinv_solve_host_sparse_rhs(i_t m, csc_cu_matrix<i_t, f_t> mat_B_pinv, const sparse_vector_t<i_t, f_t> &rhs,
+void sparse_pinv_solve_host_sparse_rhs(i_t m, csc_cu_matrix<i_t, f_t> &mat_B_pinv, const sparse_vector_t<i_t, f_t> &rhs,
                                        sparse_vector_t<i_t, f_t> &x, bool transpose) {
     // Allocate dense vectors
     f_t *d_x;
@@ -1081,7 +1081,7 @@ void compute_reduced_costs(const f_t *d_objective, const i_t *d_A_col_ptr, const
 }
 
 template <typename i_t, typename f_t>
-i_t compute_delta_x(const lp_problem_t<i_t, f_t> &lp, csc_cu_matrix<i_t, f_t> mat_B_pinv, i_t entering_index, i_t leaving_index, i_t basic_leaving_index,
+i_t compute_delta_x(const lp_problem_t<i_t, f_t> &lp, csc_cu_matrix<i_t, f_t> &mat_B_pinv, i_t entering_index, i_t leaving_index, i_t basic_leaving_index,
                     i_t direction, const std::vector<i_t> &basic_list,
                     const std::vector<f_t> &delta_x_flip,
                     const sparse_vector_t<i_t, f_t> &rhs_sparse, const std::vector<f_t> &x,
@@ -1298,7 +1298,7 @@ template <typename i_t, typename f_t>
 i_t initialize_steepest_edge_norms(const lp_problem_t<i_t, f_t> &lp,
                                    const simplex_solver_settings_t<i_t, f_t> &settings,
                                    const f_t start_time, const i_t *d_basic_list,
-                                   csc_cu_matrix<i_t, f_t> mat_B_pinv,
+                                   csc_cu_matrix<i_t, f_t> &mat_B_pinv,
                                    std::vector<f_t> &delta_y_steepest_edge, i_t m) {
     // Start of GPU code, but we fall back to CPU
     // for now i_t *d_row_degree, *d_mapping; f_t
@@ -1430,7 +1430,7 @@ template <typename i_t, typename f_t> __global__ void negate_vector_kernel(i_t m
 template <typename i_t, typename f_t>
 i_t update_steepest_edge_norms(
     const simplex_solver_settings_t<i_t, f_t> &settings, const std::vector<i_t> &basic_list,
-    csc_cu_matrix<i_t, f_t> mat_B_pinv, i_t direction, i_t *d_delta_y_sparse_indices,
+    csc_cu_matrix<i_t, f_t> &mat_B_pinv, i_t direction, i_t *d_delta_y_sparse_indices,
     f_t *d_delta_y_sparse_values, const i_t nz_delta_y_sparse, f_t dy_norm_squared,
     const sparse_vector_t<i_t, f_t> &scaled_delta_xB, i_t basic_leaving_index, i_t entering_index,
     std::vector<f_t> &v, std::vector<f_t> &delta_y_steepest_edge, i_t m) {
@@ -1513,7 +1513,7 @@ i_t update_steepest_edge_norms(
 // variable
 template <typename i_t, typename f_t>
 i_t compute_steepest_edge_norm_entering(const simplex_solver_settings_t<i_t, f_t> &settings, i_t m,
-                                        cusparseHandle_t &cusparse_handle, csc_cu_matrix<i_t, f_t> mat_B_pinv,
+                                        cusparseHandle_t &cusparse_handle, csc_cu_matrix<i_t, f_t> &mat_B_pinv,
                                         i_t basic_leaving_index, i_t entering_index,
                                         std::vector<f_t> &steepest_edge_norms) {
     sparse_vector_t<i_t, f_t> es_sparse(m, 1);
@@ -1564,7 +1564,7 @@ __global__ void compute_primal_variables_basiclist_kernel(i_t m, const i_t *d_ba
 }
 
 template <typename i_t, typename f_t>
-void compute_primal_variables(csc_cu_matrix<i_t, f_t> mat_B_pinv, const f_t *lp_rhs, const i_t *d_A_col_ptr,
+void compute_primal_variables(csc_cu_matrix<i_t, f_t> &mat_B_pinv, const f_t *lp_rhs, const i_t *d_A_col_ptr,
                               const i_t *d_A_row_ind, const f_t *d_A_values,
                               const i_t *d_basic_list, const i_t *d_nonbasic_list, f_t tight_tol,
                               f_t *&d_x, const i_t m, const i_t n) {
@@ -1643,7 +1643,7 @@ void update_dual_variables(const i_t *d_delta_y_indices, const f_t *d_delta_y_va
 template <typename i_t, typename f_t>
 i_t compute_primal_solution_from_basis(const lp_problem_t<i_t, f_t> &lp, f_t *d_lp_rhs,
                                        const i_t *d_A_col_ptr, const i_t *d_A_row_ind,
-                                       const f_t *d_A_values, csc_cu_matrix<i_t, f_t> mat_B_pinv,
+                                       const f_t *d_A_values, csc_cu_matrix<i_t, f_t> &mat_B_pinv,
                                        const i_t *d_basic_list,
                                        const i_t *d_nonbasic_list,
                                        const std::vector<variable_status_t> &vstatus,
@@ -1707,7 +1707,7 @@ i_t compute_primal_solution_from_basis(const lp_problem_t<i_t, f_t> &lp, f_t *d_
 template <typename i_t, typename f_t>
 void compute_dual_solution_from_basis(const f_t *d_lp_objective, const i_t *d_A_col_ptr,
                                       const i_t *d_A_row_ind, const f_t *d_A_values,
-                                      csc_cu_matrix<i_t, f_t> mat_B_pinv,
+                                      csc_cu_matrix<i_t, f_t> &mat_B_pinv,
                                       const i_t *d_basic_list, const i_t *d_nonbasic_list,
                                       f_t *&d_y, f_t *&d_z, i_t m, i_t n) {
     f_t *d_cB;
@@ -1756,7 +1756,7 @@ template <typename i_t, typename f_t>
 void prepare_optimality(const lp_problem_t<i_t, f_t> &lp,
                         const simplex_solver_settings_t<i_t, f_t> &settings,
                         const f_t *d_lp_objective, const i_t *d_A_col_ptr, const i_t *d_A_row_ind,
-                        const f_t *d_A_values, csc_cu_matrix<i_t, f_t> mat_B_pinv, const std::vector<f_t> &objective,
+                        const f_t *d_A_values, csc_cu_matrix<i_t, f_t> &mat_B_pinv, const std::vector<f_t> &objective,
                         const std::vector<i_t> &basic_list, const i_t *d_basic_list,
                         const std::vector<i_t> &nonbasic_list, const i_t *d_nonbasic_list,
                         const std::vector<variable_status_t> &vstatus, int phase, f_t start_time,
@@ -1847,7 +1847,7 @@ void prepare_optimality(const lp_problem_t<i_t, f_t> &lp,
 }
 
 template <typename i_t, typename f_t>
-void adjust_for_flips(cusparseHandle_t &cusparse_handle, csc_cu_matrix<i_t, f_t> mat_B_pinv,
+void adjust_for_flips(cusparseHandle_t &cusparse_handle, csc_cu_matrix<i_t, f_t> &mat_B_pinv,
                       const std::vector<i_t> &basic_list, const std::vector<i_t> &delta_z_indices,
                       std::vector<i_t> &atilde_index, std::vector<f_t> &atilde,
                       std::vector<i_t> &atilde_mark, sparse_vector_t<i_t, f_t> &delta_xB_0_sparse,

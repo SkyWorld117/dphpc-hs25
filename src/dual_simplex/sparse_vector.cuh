@@ -22,14 +22,14 @@ class cu_vector {
         CUDA_CALL_AND_CHECK(cudaMalloc(&d_values, max_nz * sizeof(f_t)), "cu_vector constructor d_values");
     }
     cu_vector(i_t m, i_t nnz, i_t max_nz, i_t* d_indices, f_t* d_values) : 
-        m(m), nnz(nnz), max_nz(max_nz), d_indices(d_indices), d_values(d_values) {}
+        m(m), nnz(nnz), max_nz(max_nz), d_indices(d_indices), d_values(d_values), free_data(false) {}
 
-    // ~cu_vector() {
-    //     if (max_nz > 0) {
-    //         cudaFree(d_indices);
-    //         cudaFree(d_values);
-    //     }
-    // }
+    ~cu_vector() {
+        if (max_nz > 0 && free_data) {
+            cudaFree(d_indices);
+            cudaFree(d_values);
+        }
+    }
 
     // subtract: self - other = result
     void subtract(const cu_vector<i_t, f_t>& other, cu_vector<i_t, f_t>& result);
@@ -51,6 +51,7 @@ class cu_vector {
     i_t max_nz;
     i_t* d_indices;
     f_t* d_values;
+    bool free_data = true;
 };
 
 }
