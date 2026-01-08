@@ -64,10 +64,19 @@ namespace phase2 {
 template <typename i_t, typename f_t>
 void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const std::vector<f_t>& rhs,
                 std::vector<f_t>& x, i_t m, bool transpose) {
-    f_t* d_rhs;
-    f_t* d_x;
-    CUDA_CALL_AND_CHECK(cudaMalloc((void**) &d_rhs, m * sizeof(f_t)), "cudaMalloc d_rhs");
-    CUDA_CALL_AND_CHECK(cudaMalloc((void**) &d_x, m * sizeof(f_t)), "cudaMalloc d_x");
+    static f_t* d_rhs = nullptr;
+    static f_t* d_x = nullptr;
+    static i_t allocated_size = 0;
+    
+    // Reallocate only if needed
+    if (allocated_size < m) {
+        if (d_rhs) CUDA_CALL_AND_CHECK(cudaFree(d_rhs), "cudaFree d_rhs");
+        if (d_x) CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
+        CUDA_CALL_AND_CHECK(cudaMalloc((void**) &d_rhs, m * sizeof(f_t)), "cudaMalloc d_rhs");
+        CUDA_CALL_AND_CHECK(cudaMalloc((void**) &d_x, m * sizeof(f_t)), "cudaMalloc d_x");
+        allocated_size = m;
+    }
+    
     CUDA_CALL_AND_CHECK(cudaMemcpy(d_rhs, rhs.data(), m * sizeof(f_t), cudaMemcpyHostToDevice),
                         "cudaMemcpy rhs to d_rhs");
     const f_t alpha = 1.0;
@@ -78,17 +87,23 @@ void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const std::vector<
         "cublasSgemv pinv_solve");
     CUDA_CALL_AND_CHECK(cudaMemcpy(x.data(), d_x, m * sizeof(f_t), cudaMemcpyDeviceToHost),
                         "cudaMemcpy d_x to x");
-    CUDA_CALL_AND_CHECK(cudaFree(d_rhs), "cudaFree d_rhs");
-    CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
 }
 
 template <typename i_t, typename f_t>
 void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const sparse_vector_t<i_t, f_t>& rhs,
                 sparse_vector_t<i_t, f_t>& x, i_t m, bool transpose) {
-    f_t* d_rhs;
-    f_t* d_x;
-    CUDA_CALL_AND_CHECK(cudaMalloc((void**) &d_rhs, m * sizeof(f_t)), "cudaMalloc d_rhs");
-    CUDA_CALL_AND_CHECK(cudaMalloc((void**) &d_x, m * sizeof(f_t)), "cudaMalloc d_x");
+    static f_t* d_rhs = nullptr;
+    static f_t* d_x = nullptr;
+    static i_t allocated_size = 0;
+    
+    // Reallocate only if needed
+    if (allocated_size < m) {
+        if (d_rhs) CUDA_CALL_AND_CHECK(cudaFree(d_rhs), "cudaFree d_rhs");
+        if (d_x) CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
+        CUDA_CALL_AND_CHECK(cudaMalloc((void**) &d_rhs, m * sizeof(f_t)), "cudaMalloc d_rhs");
+        CUDA_CALL_AND_CHECK(cudaMalloc((void**) &d_x, m * sizeof(f_t)), "cudaMalloc d_x");
+        allocated_size = m;
+    }
 
     // Copy sparse rhs to dense d_rhs
     std::vector<f_t> h_rhs_dense(m, 0.0);
@@ -119,9 +134,6 @@ void pinv_solve(cublasHandle_t& cublas_handle, f_t* d_B_pinv, const sparse_vecto
             x.x.push_back(h_x_dense[i]);
         }
     }
-
-    CUDA_CALL_AND_CHECK(cudaFree(d_rhs), "cudaFree d_rhs");
-    CUDA_CALL_AND_CHECK(cudaFree(d_x), "cudaFree d_x");
 }
 
 // Computes vectors farkas_y, farkas_zl, farkas_zu that satisfy
