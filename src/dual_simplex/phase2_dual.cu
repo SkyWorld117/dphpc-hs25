@@ -1,6 +1,9 @@
 #include "cudss.h"
 #include "cusparse.h"
+#include "dual_simplex/simplex_solver_settings.hpp"
+#include <cmath>
 #include <cstdio>
+#include <cuda_runtime_api.h>
 #include <cusparse.h>
 #include <driver_types.h>
 #include <dual_simplex/phase2_dual.cuh>
@@ -121,6 +124,46 @@ void build_basis_on_device(i_t m, const i_t *d_A_col_start, const i_t *d_A_row_i
 }
 
 template <typename i_t, typename f_t>
+__device__ __forceinline__ f_t sparse_dot_columns(const i_t *__restrict__ d_B_row_ind,
+                                                  const f_t *__restrict__ d_B_values,
+                                                  i_t start_a, i_t end_a, i_t start_b,
+                                                  i_t end_b) {
+    // Early exits exploit sparsity to avoid the merge when possible.
+    const i_t len_a = end_a - start_a;
+    const i_t len_b = end_b - start_b;
+    if (len_a == 0 || len_b == 0) {
+        return 0.0;
+    }
+
+    const i_t min_a = d_B_row_ind[start_a];
+    const i_t max_a = d_B_row_ind[end_a - 1];
+    const i_t min_b = d_B_row_ind[start_b];
+    const i_t max_b = d_B_row_ind[end_b - 1];
+
+    if (max_a < min_b || max_b < min_a) {
+        return 0.0;
+    }
+
+    f_t dot_product = 0.0;
+    i_t pa = start_a;
+    i_t pb = start_b;
+    while (pa < end_a && pb < end_b) {
+        const i_t row_a = d_B_row_ind[pa];
+        const i_t row_b = d_B_row_ind[pb];
+        if (row_a == row_b) {
+            dot_product += d_B_values[pa] * d_B_values[pb];
+            ++pa;
+            ++pb;
+        } else if (row_a < row_b) {
+            ++pa;
+        } else {
+            ++pb;
+        }
+    }
+    return dot_product;
+}
+
+template <typename i_t, typename f_t>
 __global__ void BtB_preprocess(i_t m, const i_t *__restrict__ d_B_col_ptr,
                                const i_t *__restrict__ d_B_row_ind,
                                const f_t *__restrict__ d_B_values, i_t *d_BtB_row_ptr) {
@@ -128,34 +171,24 @@ __global__ void BtB_preprocess(i_t m, const i_t *__restrict__ d_B_col_ptr,
     if (idx >= m)
         return; // Parallelization over row
 
+    constexpr f_t kEps = static_cast<f_t>(1e-12);
+
     for (i_t col = 0; col < m; ++col) {
         // Fix the index for symmetric matrix (ensuring the same floating point order)
         i_t vec_a = idx <= col ? idx : col; // Lower index
         i_t vec_b = idx <= col ? col : idx; // Higher index
 
         // Compute dot product of column 'vec_a' and column 'vec_b' of B
-        i_t vec_a_start = d_B_col_ptr[vec_a];
-        i_t vec_a_end = d_B_col_ptr[vec_a + 1];
-        i_t vec_b_start = d_B_col_ptr[vec_b];
-        i_t vec_b_end = d_B_col_ptr[vec_b + 1];
-        // Merge-like traversal (assuming both columns are sorted by row indices)
-        f_t dot_product = 0.0;
-        i_t pa = vec_a_start;
-        i_t pb = vec_b_start;
-        while (pa < vec_a_end && pb < vec_b_end) {
-            i_t row_a = d_B_row_ind[pa];
-            i_t row_b = d_B_row_ind[pb];
-            if (row_a == row_b) {
-                dot_product += d_B_values[pa] * d_B_values[pb];
-                ++pa;
-                ++pb;
-            } else if (row_a < row_b) {
-                ++pa;
-            } else {
-                ++pb;
-            }
-        }
-        if (abs(dot_product) > 1e-12) {
+        const i_t vec_a_start = d_B_col_ptr[vec_a];
+        const i_t vec_a_end = d_B_col_ptr[vec_a + 1];
+        const i_t vec_b_start = d_B_col_ptr[vec_b];
+        const i_t vec_b_end = d_B_col_ptr[vec_b + 1];
+
+        const f_t dot_product =
+            sparse_dot_columns(d_B_row_ind, d_B_values, vec_a_start, vec_a_end, vec_b_start,
+                               vec_b_end);
+
+        if (std::abs(dot_product) > kEps) {
             d_BtB_row_ptr[idx] += 1;
         }
     }
@@ -170,34 +203,24 @@ __global__ void BtB_compute(i_t m, const i_t *__restrict__ d_B_col_ptr,
     if (idx >= m)
         return; // Parallelization over row
 
+    constexpr f_t kEps = static_cast<f_t>(1e-12);
+
     for (i_t col = 0; col < m; ++col) {
         // Fix the index for symmetric matrix (ensuring the same floating point order)
         i_t vec_a = idx <= col ? idx : col; // Lower index
         i_t vec_b = idx <= col ? col : idx; // Higher index
 
         // Compute dot product of column 'vec_a' and column 'vec_b' of B
-        i_t vec_a_start = d_B_col_ptr[vec_a];
-        i_t vec_a_end = d_B_col_ptr[vec_a + 1];
-        i_t vec_b_start = d_B_col_ptr[vec_b];
-        i_t vec_b_end = d_B_col_ptr[vec_b + 1];
-        // Merge-like traversal (assuming both columns are sorted by row indices)
-        f_t dot_product = 0.0;
-        i_t pa = vec_a_start;
-        i_t pb = vec_b_start;
-        while (pa < vec_a_end && pb < vec_b_end) {
-            i_t row_a = d_B_row_ind[pa];
-            i_t row_b = d_B_row_ind[pb];
-            if (row_a == row_b) {
-                dot_product += d_B_values[pa] * d_B_values[pb];
-                ++pa;
-                ++pb;
-            } else if (row_a < row_b) {
-                ++pa;
-            } else {
-                ++pb;
-            }
-        }
-        if (abs(dot_product) > 1e-12) {
+        const i_t vec_a_start = d_B_col_ptr[vec_a];
+        const i_t vec_a_end = d_B_col_ptr[vec_a + 1];
+        const i_t vec_b_start = d_B_col_ptr[vec_b];
+        const i_t vec_b_end = d_B_col_ptr[vec_b + 1];
+
+        const f_t dot_product =
+            sparse_dot_columns(d_B_row_ind, d_B_values, vec_a_start, vec_a_end, vec_b_start,
+                               vec_b_end);
+
+        if (std::abs(dot_product) > kEps) {
             // Write to BtB
             i_t pos = write_offsets[idx]++;
             d_BtB_col_ind[pos] = col;
@@ -233,11 +256,16 @@ template <typename i_t, typename f_t>
 i_t compute_inverse(cudssHandle_t &cudss_handle,
                     cudssConfig_t &cudss_config, i_t m, i_t n, const i_t *d_A_col_ptr,
                     const i_t *d_A_row_ind, const f_t *d_A_values, i_t *&d_B_col_ptr,
-                    i_t *&d_B_row_ind, f_t *&d_B_values, f_t *&d_X, i_t &nz_B) {
+                    i_t *&d_B_row_ind, f_t *&d_B_values, f_t *&d_X, i_t &nz_B, const simplex_solver_settings_t<i_t, f_t> &settings) {
     // Here we assume (B^T B) is also sparse
     i_t *d_BtB_row_ptr = nullptr;
     i_t *d_BtB_col_ind = nullptr;
     f_t *d_BtB_values = nullptr;
+
+    if (settings.profile) {
+        cudaDeviceSynchronize();
+        settings.timer.start("Compute BtB");
+    }
 
     // 1. Preprocess to get column counts for B^T B
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_BtB_row_ptr, (m + 1) * sizeof(i_t)),
@@ -274,6 +302,11 @@ i_t compute_inverse(cudssHandle_t &cudss_handle,
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "BtB_compute kernel");
     CUDA_CALL_AND_CHECK(cudaFree(d_write_offsets), "cudaFree d_write_offsets for BtB");
 
+    if (settings.profile) {
+        cudaDeviceSynchronize();
+        settings.timer.stop("Compute BtB");
+    }
+
     // Factor (B^T B) = L*U using cuDSS and solve for (B^T B) X = B^T
     // => X = (B^T B)^(-1) B^T is the pseudo-inverse of B
     cudssStatus_t dss_status = CUDSS_STATUS_SUCCESS;
@@ -289,13 +322,25 @@ i_t compute_inverse(cudssHandle_t &cudss_handle,
                                               CUDSS_BASE_ZERO),
                          dss_status, "cudssMatrixCreateCsr for B");
 
+    if (settings.profile) {
+        cudaDeviceSynchronize();
+        settings.timer.start("Densify B_T");
+    }
     // Densify B_T for cuDSS input
     f_t *d_Bt_dense;
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_Bt_dense, m * m * sizeof(f_t)), "cudaMalloc d_Bt_dense");
     CUDA_CALL_AND_CHECK(cudaMemset(d_Bt_dense, 0, m * m * sizeof(f_t)), "cudaMemset d_Bt_dense");
     densify_Bt<<<grid_size, block_size>>>(m, d_B_col_ptr, d_B_row_ind, d_B_values, d_Bt_dense);
     CUDA_CALL_AND_CHECK(cudaGetLastError(), "densify_Bt kernel");
+    if (settings.profile) {
+        cudaDeviceSynchronize();
+        settings.timer.stop("Densify B_T");
+    }
 
+    if (settings.profile) {
+        cudaDeviceSynchronize();
+        settings.timer.start("cuDSS Factorization and Solve");
+    }
     cudssMatrix_t d_Bt_matrix_cudss;
     CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(&d_Bt_matrix_cudss, m, m, m, d_Bt_dense, CUDA_R_64F,
                                              CUDSS_LAYOUT_COL_MAJOR),
@@ -318,6 +363,10 @@ i_t compute_inverse(cudssHandle_t &cudss_handle,
     CUDSS_CALL_AND_CHECK(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, cudss_config, solverData,
                                       d_BtB_matrix_cudss, d_X_matrix_cudss, d_Bt_matrix_cudss),
                          dss_status, "cudssExecute Solve for B");
+    if (settings.profile) {
+        cudaDeviceSynchronize();
+        settings.timer.stop("cuDSS Factorization and Solve");
+    }
 
     // cuDSS cleanup
     CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(d_BtB_matrix_cudss), dss_status,
@@ -555,7 +604,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
     CUDA_CALL_AND_CHECK(cudaMalloc(&d_B_pinv, m * m * sizeof(f_t)), "cudaMalloc d_D_pinv");
     phase2_cu::compute_inverse<i_t, f_t>(cudss_handle, cudss_config, m, n,
                                          d_A_col_ptr, d_A_row_ind, d_A_values, d_B_col_ptr,
-                                         d_B_row_ind, d_B_values, d_B_pinv, nz_B);
+                                         d_B_row_ind, d_B_values, d_B_pinv, nz_B, settings);
 
     if (toc(start_time) > settings.time_limit) {
         return dual::status_t::TIME_LIMIT;
@@ -1023,7 +1072,7 @@ dual::status_t dual_phase2_cu(i_t phase, i_t slack_basis, f_t start_time,
             // Recompute d_B_pinv
             phase2_cu::compute_inverse<i_t, f_t>(
                 cudss_handle, cudss_config, m, n, d_A_col_ptr, d_A_row_ind,
-                d_A_values, d_B_col_ptr, d_B_row_ind, d_B_values, d_B_pinv, nz_B);
+                d_A_values, d_B_col_ptr, d_B_row_ind, d_B_values, d_B_pinv, nz_B, settings);
 
             phase2::reset_basis_mark(basic_list, nonbasic_list, basic_mark, nonbasic_mark);
             phase2::compute_initial_primal_infeasibilities(

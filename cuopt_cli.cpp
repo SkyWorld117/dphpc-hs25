@@ -111,6 +111,8 @@ int main(int argc, char* argv[]) {
         .help("enable GPU acceleration");
     program.add_argument("--max-iters").default_value(std::numeric_limits<int>::max()).scan<'i', int>()
         .help("set maximum iteration limit");
+    program.add_argument("--refactor-frequency").default_value(100).scan<'i', int>()
+        .help("set LU refactorization frequency");
 
     try {
         program.parse_args(argc, argv);
@@ -126,6 +128,7 @@ int main(int argc, char* argv[]) {
     const bool use_highs_presolve = program.get<bool>("--highs-presolve");
     const bool use_gpu = program.get<bool>("--gpu");
     const int max_iters = program.get<int>("--max-iters");
+    const int refactor_frequency = program.get<int>("--refactor-frequency");
 
     cuopt::linear_programming::dual_simplex::user_problem_t<int, double> user_problem;
     if (use_highs_presolve) {
@@ -162,6 +165,7 @@ int main(int argc, char* argv[]) {
     settings.profile = profile_enabled;
     settings.gpu = use_gpu;
     settings.iteration_limit = max_iters;
+    settings.refactor_frequency = refactor_frequency;
 
     cuopt::linear_programming::dual_simplex::lp_solution_t<int, double> solution(
         user_problem.num_rows, user_problem.num_cols);
