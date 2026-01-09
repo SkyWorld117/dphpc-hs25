@@ -1,42 +1,27 @@
-# TODO
-
-## Yi
+# TODOs
 - [x] implement using B_pinv as solver
 - [x] implement assembling B_T, B_T dense on device
 - [x] eta updates for B_pinv
 - [x] storage efficient implementation of solvers
 - [x] investigate better ways to store B, Bt and to compute BtB
 - [ ] implement customized sparse matrix and vector representations
-
-## Sophia
 - [x] implement assembling B from A on device
 - [ ] figure out the cost of creating and destroying handles and matrix representations in cuSPARSE
 - [ ] investigate "nearly constant" size per row in the sparse matrix representation of B and Bt (fast reconstruction without reallocating memory every time)
 - [ ] implement dense matrix - sparse vector multiplication kernel
-
-### On GPU / On CPU
-| GPU | CPU |
-|-----|-----|
-| - A     |     |
-| - b_row_ptr  |     |
-| - b_col_ind  |     |
-| - b_values   |     |
-| - B_inv
-|     |     |
-|     |     |
-
-## Julian
-- [ ] research on using different pivoting strategies in parallel
-- [ ] test the new idea of parallelizing the pivoting strategies
-
-## Not assigned
+- [ ] test the new idea of parallelizing the pivoting strategy with MPI --> in parallel-pivot-strategies
 - [ ] investigate the tradeoff of keeping basic_list on device vs copying it every time
 - [ ] move more data structures to device to reduce data transfer overhead (more kernels for various steps)
 - [ ] implement more analysis tools for optimal kernel launching
 
+# Prototype Folder
+
+This is a Python playground to test dual simplex ideas quickly.
+
 # C++ Modules
 
-This directory contains the C++ modules for the cuOpt project.
+This directory contains the C++ modules for the cuOpt project with custom GPU acceleration. 
+Use the build.sh script to create an executable. Note that many flags need to be changed depending on your environment.
 
 Please refer to the [CMakeLists.txt](CMakeLists.txt) file for details on how to add new modules and tests.
 
@@ -66,21 +51,6 @@ Add any new modules in the `src` directory under `src/cuopt/<module_name>` direc
 ```bash
 cpp/
 ├── src/
-│   ├── cuopt/
-│   │   └── linear_programming/
-│   │       └── ...
-│   │   └── routing/
-│   │       └── ...
-└── ...
-```
-
-## Test Structure
-
-Add any new modules in the `test` directory under `test/cuopt/<module_name>` directory.
-
-```bash
-cpp/
-├── test/
 │   ├── cuopt/
 │   │   └── linear_programming/
 │   │       └── ...
