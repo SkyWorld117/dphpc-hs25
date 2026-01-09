@@ -5,9 +5,12 @@ set -Eeuo pipefail
 export CUDSS_DIR="/scratch/zyi/MyPackages/libcudss-0.7.1.4"
 
 cmake -B build \
-    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_BUILD_RPATH="$FROMAGER_ENV/system/lib;$FROMAGER_ENV/system/lib64" \
     -DCMAKE_INSTALL_RPATH="$FROMAGER_ENV/system/lib;$FROMAGER_ENV/system/lib64" \
+    -DCMAKE_CUDA_ARCHITECTURES="90a" \
+    -DCMAKE_CXX_FLAGS="-O3 -mcpu=neoverse-v2" \
+    -DCMAKE_CUDA_FLAGS="-O3 --gpu-architecture=compute_90a --gpu-code=compute_90a" \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build build --parallel
 
